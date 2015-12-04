@@ -1,7 +1,7 @@
 /*
  * Function prototypes for pkcs15-init
  *
- * Copyright (C) 2002 Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002 Olaf Kirch <okir@suse.de>
  */
 
 #ifndef PKCS15_INIT_H
@@ -265,6 +265,7 @@ struct sc_pkcs15init_skeyargs {
 struct sc_pkcs15init_certargs {
 	struct sc_pkcs15_id	id;
 	const char *		label;
+	int update;
 
 	unsigned long		x509_usage;
 	unsigned char		authority;
@@ -277,6 +278,7 @@ struct sc_pkcs15init_certargs {
 
 extern struct	sc_pkcs15_object *sc_pkcs15init_new_object(int, const char *,
 				struct sc_pkcs15_id *, void *);
+extern void		sc_pkcs15init_free_object(struct sc_pkcs15_object *);
 extern void	sc_pkcs15init_set_callbacks(struct sc_pkcs15init_callbacks *);
 extern int	sc_pkcs15init_bind(struct sc_card *, const char *, const char *,
 				struct sc_app_info *app_info, struct sc_profile **);

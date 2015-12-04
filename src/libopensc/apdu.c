@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -579,7 +581,7 @@ int sc_transmit_apdu(sc_card_t *card, sc_apdu_t *apdu)
 		 * bytes using command chaining */
 		size_t    len  = apdu->datalen;
 		const u8  *buf = apdu->data;
-		size_t    max_send_size = card->max_send_size > 0 ? card->max_send_size : 255;
+		size_t    max_send_size = sc_get_max_send_size(card);
 
 		while (len != 0) {
 			size_t    plen;

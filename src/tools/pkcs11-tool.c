@@ -1,7 +1,7 @@
 /*
  * pkcs11-tool.c: Tool for poking around pkcs11 modules/tokens
  *
- * Copyright (C) 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002  Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,10 +20,19 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <errno.h>
 #include <stdlib.h>
+
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#else
+#include <io.h>
+#endif
+
 #ifdef ENABLE_OPENSSL
 #include <openssl/opensslv.h>
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
@@ -117,7 +126,9 @@ enum {
 	OPT_NEW_PIN,
 	OPT_LOGIN_TYPE,
 	OPT_TEST_EC,
-	OPT_DERIVE
+	OPT_DERIVE,
+	OPT_DECRYPT,
+	OPT_TEST_FORK,
 };
 
 static const struct option options[] = {
@@ -129,6 +140,7 @@ static const struct option options[] = {
 	{ "list-objects",	0, NULL,		'O' },
 
 	{ "sign",		0, NULL,		's' },
+	{ "decrypt",		0, NULL,		OPT_DECRYPT },
 	{ "hash",		0, NULL,		'h' },
 	{ "derive",		0, NULL,		OPT_DERIVE },
 	{ "mechanism",		1, NULL,		'm' },
@@ -174,6 +186,9 @@ static const struct option options[] = {
 	{ "verbose",		0, NULL,		'v' },
 	{ "private",		0, NULL,		OPT_PRIVATE },
 	{ "test-ec",		0, NULL,		OPT_TEST_EC },
+#ifndef _WIN32
+	{ "test-fork",		0, NULL,		OPT_TEST_FORK },
+#endif
 
 	{ NULL, 0, NULL, 0 }
 };
@@ -187,6 +202,7 @@ static const char *option_help[] = {
 	"Show objects on token",
 
 	"Sign some data",
+	"Decrypt some data",
 	"Hash some data",
 	"Derive a secret key using another key and some data",
 	"Specify mechanism (use -M for a list of supported mechanisms)",
@@ -231,7 +247,10 @@ static const char *option_help[] = {
 	"Test Mozilla-like keypair gen and cert req, <arg>=certfile",
 	"Verbose operation. (Set OPENSC_DEBUG to enable OpenSC specific debugging)",
 	"Set the CKA_PRIVATE attribute (object is only viewable after a login)",
-	"Test EC (best used with the --login or --pin option)"
+	"Test EC (best used with the --login or --pin option)",
+#ifndef _WIN32
+	"Test forking and calling C_Initialize() in the child",
+#endif
 };
 
 static const char *	app_name = "pkcs11-tool"; /* for utils.c */
@@ -334,8 +353,8 @@ static void		show_object(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		show_key(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		show_cert(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		show_dobj(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj);
-static void		sign_data(CK_SLOT_ID,
-				CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
+static void		sign_data(CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
+static void		decrypt_data(CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		hash_data(CK_SLOT_ID, CK_SESSION_HANDLE);
 static void		derive_key(CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static int		gen_keypair(CK_SESSION_HANDLE,
@@ -368,6 +387,9 @@ static int test_card_detection(int);
 static int		hex_to_bin(const char *in, CK_BYTE *out, size_t *outlen);
 static void		test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session);
 static void		test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session);
+#ifndef _WIN32
+static void		test_fork(void);
+#endif
 static CK_RV		find_object_with_attributes(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *out,
 				CK_ATTRIBUTE *attrs, CK_ULONG attrsLen, CK_ULONG obj_index);
 static CK_ULONG		get_private_key_length(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE prkey);
@@ -388,6 +410,7 @@ int main(int argc, char * argv[])
 	int do_list_mechs = 0;
 	int do_list_objects = 0;
 	int do_sign = 0;
+	int do_decrypt = 0;
 	int do_hash = 0;
 	int do_derive = 0;
 	int do_gen_keypair = 0;
@@ -398,6 +421,9 @@ int main(int argc, char * argv[])
 	int do_test = 0;
 	int do_test_kpgen_certwrite = 0;
 	int do_test_ec = 0;
+#ifndef _WIN32
+	int do_test_fork = 0;
+#endif
 	int need_session = 0;
 	int opt_login = 0;
 	int do_init_token = 0;
@@ -529,6 +555,8 @@ int main(int argc, char * argv[])
 			opt_output = optarg;
 			break;
 		case 'p':
+			need_session |= NEED_SESSION_RW;
+			opt_login = 1;
 			util_get_pin(optarg, &opt_pin);
 			break;
 		case 'c':
@@ -544,6 +572,11 @@ int main(int argc, char * argv[])
 		case 's':
 			need_session |= NEED_SESSION_RW;
 			do_sign = 1;
+			action_count++;
+			break;
+		case OPT_DECRYPT:
+			need_session |= NEED_SESSION_RW;
+			do_decrypt = 1;
 			action_count++;
 			break;
 		case 'f':
@@ -666,6 +699,12 @@ int main(int argc, char * argv[])
 			do_derive = 1;
 			action_count++;
 			break;
+#ifndef _WIN32
+		case OPT_TEST_FORK:
+			do_test_fork = 1;
+			action_count++;
+			break;
+#endif
 		default:
 			util_print_usage_and_die(app_name, options, option_help, NULL);
 		}
@@ -683,6 +722,11 @@ int main(int argc, char * argv[])
 		printf("\n*** Cryptoki library has already been initialized ***\n");
 	else if (rv != CKR_OK)
 		p11_fatal("C_Initialize", rv);
+
+#ifndef _WIN32
+	if (do_test_fork)
+		test_fork();
+#endif
 
 	if (do_show_info)
 		show_cryptoki_info();
@@ -754,7 +798,7 @@ int main(int argc, char * argv[])
 	if (do_list_mechs)
 		list_mechs(opt_slot);
 
-	if (do_sign) {
+	if (do_sign || do_decrypt) {
 		CK_TOKEN_INFO	info;
 
 		get_token_info(opt_slot, &info);
@@ -811,7 +855,7 @@ int main(int argc, char * argv[])
 		goto end;
 	}
 
-	if (do_sign || do_derive) {
+	if (do_sign || do_derive || do_decrypt) {
 		if (!find_object(session, CKO_PRIVATE_KEY, &object,
 					opt_object_id_len ? opt_object_id : NULL,
 					opt_object_id_len, 0))
@@ -827,6 +871,9 @@ int main(int argc, char * argv[])
 
 	if (do_sign)
 		sign_data(opt_slot, session, object);
+
+	if (do_decrypt)
+		decrypt_data(opt_slot, session, object);
 
 	if (do_hash)
 		hash_data(opt_slot, session);
@@ -1453,6 +1500,63 @@ static void sign_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 		close(fd);
 }
 
+
+static void decrypt_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
+		CK_OBJECT_HANDLE key)
+{
+	unsigned char	in_buffer[1024], out_buffer[1024];
+	CK_MECHANISM	mech;
+	CK_RV		rv;
+	CK_ULONG	in_len, out_len;
+	int		fd, r;
+
+	if (!opt_mechanism_used)
+		if (!find_mechanism(slot, CKF_DECRYPT|CKF_HW, NULL, 0, &opt_mechanism))
+			util_fatal("Decrypt mechanism not supported\n");
+
+	printf("Using decrypt algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
+	memset(&mech, 0, sizeof(mech));
+	mech.mechanism = opt_mechanism;
+
+	if (opt_input == NULL)
+		fd = 0;
+	else if ((fd = open(opt_input, O_RDONLY|O_BINARY)) < 0)
+		util_fatal("Cannot open %s: %m", opt_input);
+
+	r = read(fd, in_buffer, sizeof(in_buffer));
+	if (r < 0)
+		util_fatal("Cannot read from %s: %m", opt_input);
+	in_len = r;
+
+	rv = p11->C_DecryptInit(session, &mech, key);
+	if (rv != CKR_OK)
+		p11_fatal("C_DecryptInit", rv);
+
+	out_len = sizeof(out_buffer);
+	rv = p11->C_Decrypt(session, in_buffer, in_len, out_buffer, &out_len);
+	if (rv != CKR_OK)
+		p11_fatal("C_Decrypt", rv);
+
+	if (fd != 0)
+		close(fd);
+
+	if (opt_output == NULL)   {
+		fd = 1;
+	}
+	else  {
+		fd = open(opt_output, O_CREAT|O_TRUNC|O_WRONLY|O_BINARY, S_IRUSR|S_IWUSR);
+		if (fd < 0)
+			util_fatal("failed to open %s: %m", opt_output);
+	}
+
+	r = write(fd, out_buffer, out_len);
+	if (r < 0)
+		util_fatal("Failed to write to %s: %m", opt_output);
+	if (fd != 1)
+		close(fd);
+}
+
+
 static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 {
 	unsigned char	buffer[64];
@@ -1716,7 +1820,7 @@ do_read_private_key(unsigned char *data, size_t data_len, EVP_PKEY **key)
 
 	mem = BIO_new(BIO_s_mem());
 	BIO_set_mem_buf(mem, &buf_mem, BIO_NOCLOSE);
-	if (!strstr((char *)data, "-----BEGIN PRIVATE KEY-----"))
+	if (!strstr((char *)data, "-----BEGIN PRIVATE KEY-----") && !strstr((char *)data, "-----BEGIN EC PRIVATE KEY-----"))
 		*key = d2i_PrivateKey_bio(mem, NULL);
 	else
 		*key = PEM_read_bio_PrivateKey(mem, NULL, NULL, NULL);
@@ -1823,6 +1927,7 @@ static int parse_gost_private_key(EVP_PKEY *evp_key, struct gostkey_info *gost)
 static int write_object(CK_SESSION_HANDLE session)
 {
 	CK_BBOOL _true = TRUE;
+	CK_BBOOL _false = FALSE;
 	unsigned char contents[MAX_OBJECT_SIZE + 1];
 	int contents_len = 0;
 	unsigned char certdata[MAX_OBJECT_SIZE];
@@ -1895,7 +2000,8 @@ static int write_object(CK_SESSION_HANDLE session)
 			rv = parse_rsa_private_key(&rsa, contents, contents_len);
 		}
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
-		else if (evp_key->type == NID_id_GostR3410_2001)   {
+		else if (evp_key->type == NID_id_GostR3410_2001 || evp_key->type == EVP_PKEY_EC)   {
+			/* parsing ECDSA is identical to GOST */
 			rv = parse_gost_private_key(evp_key, &gost);
 		}
 #endif
@@ -1925,28 +2031,24 @@ static int write_object(CK_SESSION_HANDLE session)
 		FILL_ATTR(cert_templ[1], CKA_VALUE, contents, contents_len);
 		FILL_ATTR(cert_templ[2], CKA_CLASS, &clazz, sizeof(clazz));
 		FILL_ATTR(cert_templ[3], CKA_CERTIFICATE_TYPE, &cert_type, sizeof(cert_type));
-		n_cert_attr = 4;
+		FILL_ATTR(cert_templ[4], CKA_PRIVATE, &_false, sizeof(_false));
+		n_cert_attr = 5;
 
 		if (opt_object_label != NULL) {
-			FILL_ATTR(cert_templ[n_cert_attr], CKA_LABEL,
-				opt_object_label, strlen(opt_object_label));
+			FILL_ATTR(cert_templ[n_cert_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
 			n_cert_attr++;
 		}
 		if (opt_object_id_len != 0) {
-			FILL_ATTR(cert_templ[n_cert_attr], CKA_ID,
-				opt_object_id, opt_object_id_len);
+			FILL_ATTR(cert_templ[n_cert_attr], CKA_ID, opt_object_id, opt_object_id_len);
 			n_cert_attr++;
 		}
 #ifdef ENABLE_OPENSSL
 		/* according to PKCS #11 CKA_SUBJECT MUST be specified */
-		FILL_ATTR(cert_templ[n_cert_attr], CKA_SUBJECT,
-			cert.subject, cert.subject_len);
+		FILL_ATTR(cert_templ[n_cert_attr], CKA_SUBJECT, cert.subject, cert.subject_len);
 		n_cert_attr++;
-		FILL_ATTR(cert_templ[n_cert_attr], CKA_ISSUER,
-			cert.issuer, cert.issuer_len);
+		FILL_ATTR(cert_templ[n_cert_attr], CKA_ISSUER, cert.issuer, cert.issuer_len);
 		n_cert_attr++;
-		FILL_ATTR(cert_templ[n_cert_attr], CKA_SERIAL_NUMBER,
-			cert.serialnum, cert.serialnum_len);
+		FILL_ATTR(cert_templ[n_cert_attr], CKA_SERIAL_NUMBER, cert.serialnum, cert.serialnum_len);
 		n_cert_attr++;
 #endif
 	}
@@ -1972,6 +2074,19 @@ static int write_object(CK_SESSION_HANDLE session)
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_ID, opt_object_id, opt_object_id_len);
 			n_privkey_attr++;
 		}
+		if (opt_key_usage_sign != 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_SIGN, &_true, sizeof(_true));
+			n_privkey_attr++;
+		}
+		if (opt_key_usage_decrypt != 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_DECRYPT, &_true, sizeof(_true));
+			n_privkey_attr++;
+		}
+		if (opt_key_usage_derive != 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+			n_privkey_attr++;
+		}
+
 #ifdef ENABLE_OPENSSL
 		if (cert.subject_len != 0) {
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_SUBJECT, cert.subject, cert.subject_len);
@@ -1998,6 +2113,16 @@ static int write_object(CK_SESSION_HANDLE session)
 			n_privkey_attr++;
 		}
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
+		else if (evp_key->type == EVP_PKEY_EC)   {
+			type = CKK_EC;
+
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
+			n_privkey_attr++;
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_EC_PARAMS, gost.param_oid.value, gost.param_oid.len);
+			n_privkey_attr++;
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_VALUE, gost.private.value, gost.private.len);
+			n_privkey_attr++;
+		}
 		else if (evp_key->type == NID_id_GostR3410_2001)   {
 			type = CKK_GOSTR3410;
 
@@ -2026,9 +2151,12 @@ static int write_object(CK_SESSION_HANDLE session)
 		n_pubkey_attr = 3;
 
 		if (opt_is_private != 0) {
-			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE,
-				&_true, sizeof(_true));
-			n_data_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PRIVATE, &_true, sizeof(_true));
+			n_pubkey_attr++;
+		}
+		else {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PRIVATE, &_false, sizeof(_false));
+			n_pubkey_attr++;
 		}
 
 		if (opt_object_label != NULL) {
@@ -2041,17 +2169,27 @@ static int write_object(CK_SESSION_HANDLE session)
 				opt_object_id, opt_object_id_len);
 			n_pubkey_attr++;
 		}
-#ifdef ENABLE_OPENSSL
-		if (cert.subject_len != 0) {
-			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_SUBJECT,
-				cert.subject, cert.subject_len);
+		if (opt_key_usage_sign != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_VERIFY, &_true, sizeof(_true));
 			n_pubkey_attr++;
 		}
-		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_MODULUS,
-			rsa.modulus, rsa.modulus_len);
+		if (opt_key_usage_decrypt != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_ENCRYPT, &_true, sizeof(_true));
+			n_pubkey_attr++;
+		}
+		if (opt_key_usage_derive != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+			n_pubkey_attr++;
+		}
+
+#ifdef ENABLE_OPENSSL
+		if (cert.subject_len != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_SUBJECT, cert.subject, cert.subject_len);
+			n_pubkey_attr++;
+		}
+		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_MODULUS, rsa.modulus, rsa.modulus_len);
 		n_pubkey_attr++;
-		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PUBLIC_EXPONENT,
-			rsa.public_exponent, rsa.public_exponent_len);
+		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PUBLIC_EXPONENT, rsa.public_exponent, rsa.public_exponent_len);
 		n_pubkey_attr++;
 #endif
 	}
@@ -2065,8 +2203,11 @@ static int write_object(CK_SESSION_HANDLE session)
 		n_data_attr = 3;
 
 		if (opt_is_private != 0) {
-			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE,
-				&_true, sizeof(_true));
+			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE, &_true, sizeof(_true));
+			n_data_attr++;
+		}
+		else {
+			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE, &_false, sizeof(_false));
 			n_data_attr++;
 		}
 
@@ -2090,8 +2231,7 @@ static int write_object(CK_SESSION_HANDLE session)
 		}
 
 		if (opt_object_label != NULL) {
-			FILL_ATTR(data_templ[n_data_attr], CKA_LABEL,
-				opt_object_label, strlen(opt_object_label));
+			FILL_ATTR(data_templ[n_data_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
 			n_data_attr++;
 		}
 
@@ -2319,9 +2459,8 @@ find_mechanism(CK_SLOT_ID slot, CK_FLAGS flags,
 		else   {
 			*result = mechs[0];
 		}
-
-		free(mechs);
 	}
+	free(mechs);
 
 	return count;
 }
@@ -3261,9 +3400,9 @@ static EVP_PKEY *get_public_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE priv
 			if ( !pkey || !rsa || !mod || !exp) {
 				printf("public key not extractable\n");
 				if (pkey)
-					free(pkey);
+					EVP_PKEY_free(pkey);
 				if (rsa)
-					free(rsa);
+					RSA_free(rsa);
 				if (mod)
 					free(mod);
 				if (exp)
@@ -3318,7 +3457,7 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 #ifdef ENABLE_OPENSSL
 	int             err;
 	EVP_PKEY       *pkey;
-	EVP_MD_CTX      md_ctx;
+	EVP_MD_CTX      *md_ctx;
 
 	const EVP_MD         *evp_mds[] = {
 		EVP_sha1(),
@@ -3362,9 +3501,16 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 	if (!(pkey = get_public_key(session, privKeyObject)))
 		return errors;
 
-	EVP_VerifyInit(&md_ctx, evp_mds[evp_md_index]);
-	EVP_VerifyUpdate(&md_ctx, verifyData, verifyDataLen);
-	err = EVP_VerifyFinal(&md_ctx, sig1, sigLen1, pkey);
+	md_ctx = EVP_MD_CTX_create();
+	if (!md_ctx)
+		err = -1;
+	else {
+		EVP_VerifyInit(md_ctx, evp_mds[evp_md_index]);
+		EVP_VerifyUpdate(md_ctx, verifyData, verifyDataLen);
+		err = EVP_VerifyFinal(md_ctx, sig1, sigLen1, pkey);
+		EVP_MD_CTX_destroy(md_ctx);
+		EVP_PKEY_free(pkey);
+	}
 	if (err == 0) {
 		printf("ERR: verification failed\n");
 		errors++;
@@ -3494,6 +3640,9 @@ static int test_signature(CK_SESSION_HANDLE sess)
 
 	ck_mech.mechanism = firstMechType;
 	rv = p11->C_SignInit(sess, &ck_mech, privKeyObject);
+	/* mechanism not implemented, don't test */
+	if (rv == CKR_MECHANISM_INVALID)
+		return errors;
 	if (rv != CKR_OK)
 		p11_fatal("C_SignInit", rv);
 
@@ -4456,6 +4605,29 @@ static void test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	printf("==> OK\n");
 }
 
+#ifndef _WIN32
+static void test_fork(void)
+{
+	CK_RV rv;
+	pid_t pid = fork();
+
+	if (!pid) {
+		printf("*** Calling C_Initialize in forked child process ***\n");
+		rv = p11->C_Initialize(NULL);
+		if (rv != CKR_OK)
+			p11_fatal("C_Initialize in child\n", rv);
+		exit(0);
+	} else if (pid < 0) {
+		util_fatal("Failed to fork for test: %s", strerror(errno));
+	} else {
+		int st;
+		waitpid(pid, &st, 0);
+		if (!WIFEXITED(st) || WEXITSTATUS(st))
+			util_fatal("Child process exited with status %d", st);
+	}
+
+}
+#endif
 
 static const char *p11_flag_names(struct flag_info *list, CK_FLAGS value)
 {

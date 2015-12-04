@@ -424,8 +424,9 @@ fix_starcos_pkcs15_card(struct sc_pkcs15_card *p15card)
 	if (strcmp(p15card->card->driver->short_name,"cardos") == 0) {
 
 		/* D-Trust cards (D-TRUST, D-SIGN) */
-		if (strstr(p15card->tokeninfo->label,"D-TRUST") != NULL
-			|| strstr(p15card->tokeninfo->label,"D-SIGN") != NULL) {
+		if (p15card->tokeninfo->label
+				&& (strstr(p15card->tokeninfo->label,"D-TRUST") != NULL
+					|| strstr(p15card->tokeninfo->label,"D-SIGN") != NULL)) {
 
 			/* D-TRUST Card 2.0 2cc (standard cards, which always add
 			 * SHA1 prefix itself */
@@ -547,7 +548,7 @@ sc_pkcs15_get_lastupdate(struct sc_pkcs15_card *p15card)
 	if (!p15card->tokeninfo->last_update.path.len)
 		return NULL;
 
-        r = sc_select_file(p15card->card, &p15card->tokeninfo->last_update.path, &file);
+	r = sc_select_file(p15card->card, &p15card->tokeninfo->last_update.path, &file);
 	if (r < 0)
 		return NULL;
 
@@ -911,14 +912,19 @@ sc_dup_app_info(const struct sc_app_info *info)
 
 	if (info->label) {
 		out->label = strdup(info->label);
-		if (!out->label)
+		if (!out->label) {
+			free(out);
 			return NULL;
+		}
 	} else
 		out->label = NULL;
 
 	out->ddo.value = malloc(info->ddo.len);
-	if (!out->ddo.value)
+	if (!out->ddo.value) {
+		free(out->label);
+		free(out);
 		return NULL;
+	}
 	memcpy(out->ddo.value, info->ddo.value, info->ddo.len);
 
 	return out;
@@ -969,7 +975,7 @@ sc_pkcs15_get_application_by_type(struct sc_card * card, char *app_type)
 }
 
 
-static int
+int
 sc_pkcs15_bind_internal(struct sc_pkcs15_card *p15card, struct sc_aid *aid)
 {
 	struct sc_path tmppath;
@@ -1499,8 +1505,8 @@ compare_obj_data_name(struct sc_pkcs15_object *obj, const char *app_label, const
 	if (obj->type != SC_PKCS15_TYPE_DATA_OBJECT)
 		return 0;
 
-	return !strcmp(cinfo->app_label, app_label) &&
-		!strcmp(obj->label, label);
+	return !strncmp(cinfo->app_label, app_label, sizeof cinfo->app_label) &&
+		!strncmp(obj->label, label, sizeof obj->label);
 }
 
 
@@ -2697,7 +2703,7 @@ sc_pkcs15_get_object_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15
 	struct sc_serial_number serialnr;
 	struct sc_pkcs15_id  id;
 	unsigned char guid_bin[SC_PKCS15_MAX_ID_SIZE + SC_MAX_SERIALNR];
-	int rv;
+	int rv, guid_bin_size;
 
 	LOG_FUNC_CALLED(ctx);
 	if(!out || !out_size)
@@ -2709,18 +2715,6 @@ sc_pkcs15_get_object_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15
 	}
 
 	memset(out, 0, *out_size);
-	if ((obj->type & SC_PKCS15_TYPE_CLASS_MASK) == SC_PKCS15_TYPE_PRKEY)   {
-		struct sc_pkcs15_prkey_info *info = (struct sc_pkcs15_prkey_info *)obj->data;
-
-		if (info->cmap_record.guid && info->cmap_record.guid_len)   {
-			if (*out_size < info->cmap_record.guid_len)
-				LOG_FUNC_RETURN(ctx, SC_ERROR_BUFFER_TOO_SMALL);
-
-			memcpy(out, info->cmap_record.guid, info->cmap_record.guid_len);
-			*out_size = info->cmap_record.guid_len;
-			LOG_FUNC_RETURN(ctx, SC_SUCCESS);
-		}
-	}
 
 	rv = sc_pkcs15_get_object_id(obj, &id);
 	LOG_TEST_RET(ctx, rv, "Cannot get object's ID");
@@ -2748,23 +2742,34 @@ sc_pkcs15_get_object_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15
 	memset(guid_bin, 0, sizeof(guid_bin));
 	memcpy(guid_bin, id.value, id.len);
 	memcpy(guid_bin + id.len, serialnr.value, serialnr.len);
+	guid_bin_size = id.len + serialnr.len;
 
-	// If OpenSSL is available (SHA1), then rather use the hash of the data
-	// - this also protects against data being too short
+        /*
+	 * If OpenSSL is available (SHA1), then rather use the hash of the data
+         * - this also protects against data being too short
+	 */
 #ifdef ENABLE_OPENSSL
-	SHA1(guid_bin, id.len + serialnr.len, guid_bin);
-	id.len = SHA_DIGEST_LENGTH;
-	serialnr.len = 0;
+	SHA1(guid_bin, guid_bin_size, guid_bin);
+	guid_bin_size = SHA_DIGEST_LENGTH;
+#else
+	/* If guid_bin has a size larger than 16 bytes
+	 * force the remaining bytes up to 16 bytes to be zero
+	 * so sc_pkcs15_serialize_guid won't fail because the size is less than 16
+	 */
+	if (guid_bin_size < 16)
+		guid_bin_size = 16;
 #endif
 
-	rv = sc_pkcs15_serialize_guid(guid_bin, id.len + serialnr.len, flags, (char *)out, *out_size);
+	rv = sc_pkcs15_serialize_guid(guid_bin, guid_bin_size, flags, (char *)out, *out_size);
 	LOG_TEST_RET(ctx, rv, "Serialize GUID error");
 
 	*out_size = strlen((char *)out);
 	LOG_FUNC_RETURN(ctx, rv);
 }
 
-void sc_pkcs15_free_key_params(struct sc_pkcs15_key_params *params)
+
+void
+sc_pkcs15_free_key_params(struct sc_pkcs15_key_params *params)
 {
 	if (!params)
 		return;

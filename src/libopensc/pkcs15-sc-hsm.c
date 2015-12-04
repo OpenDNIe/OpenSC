@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -296,10 +298,10 @@ int sc_pkcs15emu_sc_hsm_encode_cvc(sc_pkcs15_card_t * p15card,
 	}
 
 	sc_format_asn1_entry(asn1_cvc_body    , &cvc->cpi, NULL, 1);
-	lencar = strlen(cvc->car);
+	lencar = strnlen(cvc->car, sizeof cvc->car);
 	sc_format_asn1_entry(asn1_cvc_body + 1, &cvc->car, &lencar, 1);
 	sc_format_asn1_entry(asn1_cvc_body + 2, &asn1_cvc_pubkey, NULL, 1);
-	lenchr = strlen(cvc->chr);
+	lenchr = strnlen(cvc->chr, sizeof cvc->chr);
 	sc_format_asn1_entry(asn1_cvc_body + 3, &cvc->chr, &lenchr, 1);
 
 	sc_format_asn1_entry(asn1_cvcert    , &asn1_cvc_body, NULL, 1);
@@ -390,8 +392,10 @@ static int sc_pkcs15emu_sc_hsm_get_ec_public_key(struct sc_context *ctx, sc_cvc_
 
 	ecp->der.len = oid->len + 2;
 	ecp->der.value = calloc(ecp->der.len, 1);
-	if (!ecp->der.value)
+	if (!ecp->der.value) {
+		free(ecp);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 
 	*(ecp->der.value + 0) = 0x06;
 	*(ecp->der.value + 1) = (u8)oid->len;
@@ -399,8 +403,11 @@ static int sc_pkcs15emu_sc_hsm_get_ec_public_key(struct sc_context *ctx, sc_cvc_
 	ecp->type = 1;		// Named curve
 
 	pubkey->alg_id = (struct sc_algorithm_id *)calloc(1, sizeof(struct sc_algorithm_id));
-	if (!pubkey->alg_id)
+	if (!pubkey->alg_id) {
+		free(ecp->der.value);
+		free(ecp);
 		return SC_ERROR_OUT_OF_MEMORY;
+	}
 
 	pubkey->alg_id->algorithm = SC_ALGORITHM_EC;
 	pubkey->alg_id->params = ecp;
@@ -518,6 +525,7 @@ static int sc_pkcs15emu_sc_hsm_add_pubkey(sc_pkcs15_card_t *p15card, sc_pkcs15_p
 		pubkey_info.modulus_length = pubkey.u.rsa.modulus.len << 3;
 		r = sc_pkcs15emu_add_rsa_pubkey(p15card, &pubkey_obj, &pubkey_info);
 	} else {
+		/* TODO fix if support of non multiple of 8 curves are added */
 		pubkey_info.field_length = cvc.primeOrModuluslen << 3;
 		r = sc_pkcs15emu_add_ec_pubkey(p15card, &pubkey_obj, &pubkey_info);
 	}
@@ -541,7 +549,6 @@ static int sc_pkcs15emu_sc_hsm_add_prkd(sc_pkcs15_card_t * p15card, u8 keyid) {
 	sc_pkcs15_object_t cert_obj;
 	struct sc_pkcs15_object prkd;
 	sc_pkcs15_prkey_info_t *key_info;
-	sc_file_t *file = NULL;
 	sc_path_t path;
 	u8 fid[2];
 	u8 efbin[512];
@@ -554,13 +561,12 @@ static int sc_pkcs15emu_sc_hsm_add_prkd(sc_pkcs15_card_t * p15card, u8 keyid) {
 
 	/* Try to select a related EF containing the PKCS#15 description of the key */
 	sc_path_set(&path, SC_PATH_TYPE_FILE_ID, fid, sizeof(fid), 0, 0);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 
 	if (r != SC_SUCCESS) {
 		return SC_SUCCESS;
 	}
 
-	sc_file_free(file);
 	r = sc_read_binary(p15card->card, 0, efbin, sizeof(efbin), 0);
 	LOG_TEST_RET(card->ctx, r, "Could not read EF.PRKD");
 
@@ -595,13 +601,11 @@ static int sc_pkcs15emu_sc_hsm_add_prkd(sc_pkcs15_card_t * p15card, u8 keyid) {
 	fid[0] = EE_CERTIFICATE_PREFIX;
 
 	sc_path_set(&path, SC_PATH_TYPE_FILE_ID, fid, sizeof(fid), 0, 0);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 
 	if (r != SC_SUCCESS) {
 		return SC_SUCCESS;
 	}
-
-	sc_file_free(file);
 
 	/* Check if the certificate is a X.509 certificate */
 	r = sc_read_binary(p15card->card, 0, efbin, 1, 0);
@@ -643,7 +647,6 @@ static int sc_pkcs15emu_sc_hsm_add_dcod(sc_pkcs15_card_t * p15card, u8 id) {
 	sc_card_t *card = p15card->card;
 	sc_pkcs15_data_info_t *data_info;
 	sc_pkcs15_object_t data_obj;
-	sc_file_t *file = NULL;
 	sc_path_t path;
 	u8 fid[2];
 	u8 efbin[512];
@@ -656,13 +659,12 @@ static int sc_pkcs15emu_sc_hsm_add_dcod(sc_pkcs15_card_t * p15card, u8 id) {
 
 	/* Try to select a related EF containing the PKCS#15 description of the data */
 	sc_path_set(&path, SC_PATH_TYPE_FILE_ID, fid, sizeof(fid), 0, 0);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 
 	if (r != SC_SUCCESS) {
 		return SC_SUCCESS;
 	}
 
-	sc_file_free(file);
 	r = sc_read_binary(p15card->card, 0, efbin, sizeof(efbin), 0);
 	LOG_TEST_RET(card->ctx, r, "Could not read EF.DCOD");
 
@@ -692,7 +694,6 @@ static int sc_pkcs15emu_sc_hsm_add_cd(sc_pkcs15_card_t * p15card, u8 id) {
 	sc_card_t *card = p15card->card;
 	sc_pkcs15_cert_info_t *cert_info;
 	sc_pkcs15_object_t obj;
-	sc_file_t *file = NULL;
 	sc_path_t path;
 	u8 fid[2];
 	u8 efbin[512];
@@ -705,13 +706,12 @@ static int sc_pkcs15emu_sc_hsm_add_cd(sc_pkcs15_card_t * p15card, u8 id) {
 
 	/* Try to select a related EF containing the PKCS#15 description of the data */
 	sc_path_set(&path, SC_PATH_TYPE_FILE_ID, fid, sizeof(fid), 0, 0);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 
 	if (r != SC_SUCCESS) {
 		return SC_SUCCESS;
 	}
 
-	sc_file_free(file);
 	r = sc_read_binary(p15card->card, 0, efbin, sizeof(efbin), 0);
 	LOG_TEST_RET(card->ctx, r, "Could not read EF.DCOD");
 
@@ -736,7 +736,6 @@ static int sc_pkcs15emu_sc_hsm_add_cd(sc_pkcs15_card_t * p15card, u8 id) {
 static int sc_pkcs15emu_sc_hsm_read_tokeninfo (sc_pkcs15_card_t * p15card)
 {
 	sc_card_t *card = p15card->card;
-	sc_file_t *file = NULL;
 	sc_path_t path;
 	int r;
 	u8 efbin[512];
@@ -745,9 +744,8 @@ static int sc_pkcs15emu_sc_hsm_read_tokeninfo (sc_pkcs15_card_t * p15card)
 
 	/* Read token info */
 	sc_path_set(&path, SC_PATH_TYPE_FILE_ID, (u8 *) "\x2F\x03", 2, 0, 0);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 	LOG_TEST_RET(card->ctx, r, "Could not select EF.TokenInfo");
-	sc_file_free(file);
 
 	r = sc_read_binary(p15card->card, 0, efbin, sizeof(efbin), 0);
 	LOG_TEST_RET(card->ctx, r, "Could not read EF.TokenInfo");
@@ -806,9 +804,8 @@ static int sc_pkcs15emu_sc_hsm_init (sc_pkcs15_card_t * p15card)
 
 	/* Read device certificate to determine serial number */
 	sc_path_set(&path, SC_PATH_TYPE_FILE_ID, (u8 *) "\x2F\x02", 2, 0, 0);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 	LOG_TEST_RET(card->ctx, r, "Could not select EF.C_DevAut");
-	sc_file_free(file);
 
 	r = sc_read_binary(p15card->card, 0, efbin, sizeof(efbin), 0);
 	LOG_TEST_RET(card->ctx, r, "Could not read EF.C_DevAut");
@@ -843,7 +840,7 @@ static int sc_pkcs15emu_sc_hsm_init (sc_pkcs15_card_t * p15card)
 	if (appinfo->label == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_OUT_OF_MEMORY);
 
-	len = strlen(devcert.chr);		/* Strip last 5 digit sequence number from CHR */
+	len = strnlen(devcert.chr, sizeof devcert.chr);		/* Strip last 5 digit sequence number from CHR */
 	assert(len >= 8);
 	len -= 5;
 
@@ -863,9 +860,10 @@ static int sc_pkcs15emu_sc_hsm_init (sc_pkcs15_card_t * p15card)
 
 	pin_info.auth_id.len = 1;
 	pin_info.auth_id.value[0] = 1;
+	pin_info.path.aid = sc_hsm_aid;
 	pin_info.auth_type = SC_PKCS15_PIN_AUTH_TYPE_PIN;
 	pin_info.attrs.pin.reference = 0x81;
-	pin_info.attrs.pin.flags = SC_PKCS15_PIN_FLAG_LOCAL|SC_PKCS15_PIN_FLAG_INITIALIZED|SC_PKCS15_PIN_FLAG_UNBLOCK_DISABLED|SC_PKCS15_PIN_FLAG_EXCHANGE_REF_DATA;
+	pin_info.attrs.pin.flags = SC_PKCS15_PIN_FLAG_LOCAL|SC_PKCS15_PIN_FLAG_INITIALIZED|SC_PKCS15_PIN_FLAG_EXCHANGE_REF_DATA;
 	pin_info.attrs.pin.type = SC_PKCS15_PIN_TYPE_ASCII_NUMERIC;
 	pin_info.attrs.pin.min_length = 6;
 	pin_info.attrs.pin.stored_length = 0;
@@ -887,16 +885,17 @@ static int sc_pkcs15emu_sc_hsm_init (sc_pkcs15_card_t * p15card)
 
 	pin_info.auth_id.len = 1;
 	pin_info.auth_id.value[0] = 2;
+	pin_info.path.aid = sc_hsm_aid;
 	pin_info.auth_type = SC_PKCS15_PIN_AUTH_TYPE_PIN;
 	pin_info.attrs.pin.reference = 0x88;
-	pin_info.attrs.pin.flags = SC_PKCS15_PIN_FLAG_LOCAL|SC_PKCS15_PIN_FLAG_CHANGE_DISABLED|SC_PKCS15_PIN_FLAG_INITIALIZED|SC_PKCS15_PIN_FLAG_UNBLOCK_DISABLED|SC_PKCS15_PIN_FLAG_SO_PIN;
+	pin_info.attrs.pin.flags = SC_PKCS15_PIN_FLAG_LOCAL|SC_PKCS15_PIN_FLAG_INITIALIZED|SC_PKCS15_PIN_FLAG_UNBLOCK_DISABLED|SC_PKCS15_PIN_FLAG_SO_PIN;
 	pin_info.attrs.pin.type = SC_PKCS15_PIN_TYPE_BCD;
 	pin_info.attrs.pin.min_length = 16;
 	pin_info.attrs.pin.stored_length = 0;
 	pin_info.attrs.pin.max_length = 16;
 	pin_info.attrs.pin.pad_char = '\0';
-	pin_info.tries_left = 3;
-	pin_info.max_tries = 3;
+	pin_info.tries_left = 15;
+	pin_info.max_tries = 15;
 
 	strlcpy(pin_obj.label, "SOPIN", sizeof(pin_obj.label));
 	pin_obj.flags = SC_PKCS15_CO_FLAG_PRIVATE;

@@ -1,7 +1,7 @@
 /*
  * pkc15-algo.c: ASN.1 handling for algorithm IDs and parameters
  *
- * Copyright (C) 2001, 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2001, 2002  Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -279,20 +281,22 @@ asn1_decode_ec_params(sc_context_t *ctx, void **paramp,
 	if (buflen == 0 || buf == NULL)
 		return 0;
 
-	ecp = calloc(sizeof(struct sc_ec_parameters), 1);
-	if (ecp == NULL)
-		return SC_ERROR_OUT_OF_MEMORY;
-
 	r = sc_asn1_decode_choice(ctx, asn1_ec_params, buf, buflen, NULL, NULL);
 	/* r = index in asn1_ec_params */
 	sc_debug(ctx, SC_LOG_DEBUG_ASN1, "asn1_decode_ec_params r=%d", r);
 	if (r < 0)
 		return r;
 
+	ecp = calloc(sizeof(struct sc_ec_parameters), 1);
+	if (ecp == NULL)
+		return SC_ERROR_OUT_OF_MEMORY;
+
 	if (r <= 1) {
 		ecp->der.value = malloc(buflen);
-		if (ecp->der.value == NULL)
+		if (ecp->der.value == NULL) {
+			free(ecp);
 			return SC_ERROR_OUT_OF_MEMORY;
+		}
 		ecp->der.len = buflen;
 		memcpy(ecp->der.value, buf, buflen);
 	}
@@ -302,7 +306,7 @@ asn1_decode_ec_params(sc_context_t *ctx, void **paramp,
 
 	ecp->type = r; /* but 0 = ecparams if any, 1=named curve */
 	*paramp = ecp;
-	return 0;
+	return SC_SUCCESS;
 };
 
 static int

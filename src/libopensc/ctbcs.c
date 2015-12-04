@@ -1,7 +1,7 @@
 /*
  * ctbcs.c: Extended CTBCS commands, used for pcsc and ct-api readers
  *
- * Copyright (C) 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002  Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <assert.h>
 #include <stdlib.h>
@@ -69,7 +71,7 @@ ctbcs_build_perform_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *d
 	/* card apdu must be last in packet */
 	if (!data->apdu)
 		return SC_ERROR_INTERNAL;
-	if (count + 7 > buflen)
+	if (count + 8 > buflen)
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	j = count;
@@ -93,12 +95,14 @@ ctbcs_build_perform_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *d
 
 	if (data->flags & SC_PIN_CMD_NEED_PADDING) {
 		len = data->pin1.pad_length;
-		if (j + len > buflen || len > 256)
+		if (1 + j + 1 + len > buflen || len > 256)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		buf[j++] = len;
 		memset(buf+j, data->pin1.pad_char, len);
 		j += len;
 	}
+	if (count + 1 > buflen)
+		return SC_ERROR_BUFFER_TOO_SMALL;
 	buf[count+1] = j - count - 2;
 	count = j;
 
@@ -141,6 +145,8 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	j = count;
+	if (j + 2 > buflen)
+		return SC_ERROR_BUFFER_TOO_SMALL;
 	buf[j++] = CTBCS_TAG_VERIFY_CMD;
 	buf[j++] = 0x00;
 
@@ -152,6 +158,8 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 		return SC_ERROR_INVALID_ARGUMENTS;
 	if (data->pin1.min_length == data->pin1.max_length)
 		control |= data->pin1.min_length << CTBCS_PIN_CONTROL_LEN_SHIFT;
+	if (j + 7 > buflen)
+		return SC_ERROR_BUFFER_TOO_SMALL;
 	buf[j++] = control;
 	buf[j++] = data->pin1.offset+1; /* Looks like offset is 1-based in CTBCS */
 	buf[j++] = data->pin2.offset+1;
@@ -162,12 +170,14 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 
 	if (data->flags & SC_PIN_CMD_NEED_PADDING) {
 		len = data->pin1.pad_length + data->pin2.pad_length;
-		if (j + len > buflen || len > 256)
+		if (1 + j + 1 + len > buflen || len > 256)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		buf[j++] = len;
 		memset(buf+j, data->pin1.pad_char, len);
 		j += len;
 	}
+	if (count > buflen)
+		return SC_ERROR_BUFFER_TOO_SMALL;
 	buf[count+1] = j - count - 2;
 	count = j;
 

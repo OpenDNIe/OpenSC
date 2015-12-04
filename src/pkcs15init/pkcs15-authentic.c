@@ -350,8 +350,11 @@ authentic_sdo_allocate_prvkey(struct sc_profile *profile, struct sc_card *card,
 	LOG_TEST_RET(ctx, rv, "Cannot instantiate new PRKEY-RSA file");
 
 	sdo = calloc(1, sizeof(struct sc_authentic_sdo));
-	if (!sdo)
+	if (!sdo) {
+		sc_file_free(file);
 		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate 'sc_authentic_sdo'");
+	}
+	*out = sdo;
 
 	sdo->magic = AUTHENTIC_SDO_MAGIC;
 	sdo->docp.id = key_info->key_reference &  ~AUTHENTIC_OBJECT_REF_FLAG_LOCAL;
@@ -359,13 +362,11 @@ authentic_sdo_allocate_prvkey(struct sc_profile *profile, struct sc_card *card,
 
 	rv = authentic_docp_set_acls(card, file, authentic_v3_rsa_ac_ops,
 			sizeof(authentic_v3_rsa_ac_ops)/sizeof(authentic_v3_rsa_ac_ops[0]), &sdo->docp);
-	LOG_TEST_RET(ctx, rv, "Cannot set key ACLs from file");
-
 	sc_file_free(file);
+	LOG_TEST_RET(ctx, rv, "Cannot set key ACLs from file");
 
 	sc_log(ctx, "sdo(mech:%X,id:%X,acls:%s)", sdo->docp.mech, sdo->docp.id,
 			sc_dump_hex(sdo->docp.acl_data, sdo->docp.acl_data_len));
-	*out = sdo;
 
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
@@ -547,8 +548,8 @@ authentic_pkcs15_create_key(struct sc_profile *profile, struct sc_pkcs15_card *p
 		| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
 		| SC_PKCS15_PRKEY_ACCESS_SENSITIVE;
 
-        rv = authentic_sdo_allocate_prvkey(profile, card, key_info, &sdo);
-        LOG_TEST_RET(ctx, rv, "IasEcc: init SDO private key failed");
+	rv = authentic_sdo_allocate_prvkey(profile, card, key_info, &sdo);
+	LOG_TEST_RET(ctx, rv, "IasEcc: init SDO private key failed");
 
 	rv = sc_card_ctl(card, SC_CARDCTL_AUTHENTIC_SDO_CREATE, sdo);
 	if (rv == SC_ERROR_FILE_ALREADY_EXISTS)   {
@@ -719,12 +720,12 @@ authentic_pkcs15_delete_rsa_sdo (struct sc_profile *profile, struct sc_pkcs15_ca
 	sc_log(ctx, "delete SDO RSA key (ref:%i,size:%i)", key_info->key_reference, key_info->modulus_length);
 
 	rv = authentic_pkcs15_new_file(profile, p15card->card, SC_PKCS15_TYPE_PRKEY_RSA, key_info->key_reference, &file);
-	LOG_TEST_RET(ctx, rv, "PRKEY_RSA instantiation file error");
+	LOG_TEST_GOTO_ERR(ctx, rv, "PRKEY_RSA instantiation file error");
 
 	p15card->card->caps &= ~SC_CARD_CAP_USE_FCI_AC;
 	rv = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_DELETE);
 	p15card->card->caps = caps;
-	LOG_TEST_RET(ctx, rv, "'DELETE' authentication failed for parent RSA key");
+	LOG_TEST_GOTO_ERR(ctx, rv, "'DELETE' authentication failed for parent RSA key");
 
 	sdo.magic = AUTHENTIC_SDO_MAGIC;
 	sdo.docp.id = key_info->key_reference & ~AUTHENTIC_OBJECT_REF_FLAG_LOCAL;
@@ -733,8 +734,11 @@ authentic_pkcs15_delete_rsa_sdo (struct sc_profile *profile, struct sc_pkcs15_ca
 	rv = sc_card_ctl(p15card->card, SC_CARDCTL_AUTHENTIC_SDO_DELETE, &sdo);
 	if (rv == SC_ERROR_DATA_OBJECT_NOT_FOUND)
 		rv = SC_SUCCESS;
-	LOG_TEST_RET(ctx, rv, "SC_CARDCTL_AUTHENTIC_SDO_DELETE failed for private key");
+	LOG_TEST_GOTO_ERR(ctx, rv, "SC_CARDCTL_AUTHENTIC_SDO_DELETE failed for private key");
 
+err:
+	if (file)
+		sc_file_free(file);
 	LOG_FUNC_RETURN(ctx, rv);
 }
 

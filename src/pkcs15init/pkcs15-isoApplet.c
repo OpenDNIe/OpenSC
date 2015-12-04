@@ -186,7 +186,7 @@ isoApplet_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	if(!profile || !p15card || !df || !p15card->card || !p15card->card->ctx)
+	if(!profile || !df || !p15card->card->ctx)
 	{
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
@@ -265,7 +265,7 @@ isoApplet_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	if(!pin || !pin_len || !p15card || !p15card->card || !df || !&df->path)
+	if(!pin || !pin_len || !df || !&df->path)
 	{
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
@@ -295,8 +295,10 @@ isoApplet_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t
 	                             pin_attrs->reference,
 	                             NULL, 0,
 	                             pin, pin_len, NULL);
+	LOG_TEST_RET(card->ctx, r, "Failed to set PIN");
 
-	LOG_FUNC_RETURN(card->ctx, r);
+	sc_pkcs15_pincache_add(p15card, pin_obj, pin, pin_len);
+	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 }
 
 /*
@@ -485,7 +487,7 @@ isoApplet_generate_key_ec(const sc_pkcs15_prkey_info_t *key_info, sc_card_t *car
 	args.pubkey.ec.params.coFactor.len			= curve->coFactor.len;
 	/* The length of the public key point will be:
 	 * Uncompressed tag + 2 * field length in bytes. */
-	args.pubkey.ec.ecPointQ.len = 1 + 2 * key_info->field_length / 8;
+	args.pubkey.ec.ecPointQ.len = 1 + (key_info->field_length + 7) / 8 * 2;
 	args.pubkey.ec.ecPointQ.value = malloc(args.pubkey.ec.ecPointQ.len);
 	if(!args.pubkey.ec.ecPointQ.value)
 	{

@@ -4,17 +4,20 @@ AC_PREREQ(2.60)
 
 define([PRODUCT_NAME], [OpenSC])
 define([PRODUCT_TARNAME], [opensc])
-define([PRODUCT_BUGREPORT], [opensc-devel@lists.sourceforge.net])
+define([PRODUCT_BUGREPORT], [https://github.com/OpenSC/OpenSC/issues])
 define([PACKAGE_VERSION_MAJOR], [0])
-define([PACKAGE_VERSION_MINOR], [14])
+define([PACKAGE_VERSION_MINOR], [15])
 define([PACKAGE_VERSION_FIX], [0])
 define([PACKAGE_SUFFIX], [])
 define([PACKAGE_VERSION_REVISION], [0])
 
 define([VS_FF_LEGAL_COPYRIGHT], [OpenSC Project])
 define([VS_FF_LEGAL_COMPANY_NAME], [OpenSC Project])
+define([VS_FF_LEGAL_COMPANY_URL], [https://github.com/OpenSC])
 define([VS_FF_COMMENTS], [Provided under the terms of the GNU Lesser General Public License (LGPLv2.1+).])
 define([VS_FF_PRODUCT_NAME], [OpenSC smartcard framework])
+define([VS_FF_PRODUCT_UPDATES], [https://github.com/OpenSC/OpenSC/releases])
+define([VS_FF_PRODUCT_URL], [https://github.com/OpenSC/OpenSC])
 
 m4_include(version.m4)
 m4_sinclude(version.m4.ci)
@@ -32,15 +35,18 @@ OPENSC_VERSION_REVISION="PACKAGE_VERSION_REVISION"
 
 OPENSC_VS_FF_LEGAL_COPYRIGHT="VS_FF_LEGAL_COPYRIGHT"
 OPENSC_VS_FF_COMPANY_NAME="VS_FF_LEGAL_COMPANY_NAME"
+OPENSC_VS_FF_COMPANY_URL="VS_FF_LEGAL_COMPANY_URL"
 OPENSC_VS_FF_COMMENTS="VS_FF_COMMENTS"
 OPENSC_VS_FF_PRODUCT_NAME="VS_FF_PRODUCT_NAME"
+OPENSC_VS_FF_PRODUCT_UPDATES="VS_FF_PRODUCT_UPDATES"
+OPENSC_VS_FF_PRODUCT_URL="VS_FF_PRODUCT_URL"
 
 # LT Version numbers, remember to change them just *before* a release.
 #   (Code changed:                      REVISION++)
 #   (Oldest interface removed:          OLDEST++)
 #   (Interfaces added:                  CURRENT++, REVISION=0)
-OPENSC_LT_CURRENT="3"
-OPENSC_LT_OLDEST="3"
+OPENSC_LT_CURRENT="4"
+OPENSC_LT_OLDEST="4"
 OPENSC_LT_REVISION="0"
 OPENSC_LT_AGE="0"
 OPENSC_LT_AGE="$((${OPENSC_LT_CURRENT}-${OPENSC_LT_OLDEST}))"
@@ -52,6 +58,8 @@ m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
 AC_CANONICAL_HOST
 AC_PROG_CC
+# AC_PROG_CXX is needed to built the win32 custom action. Indeed dutil.h use [extern "C"] definition which fails on pure c compiler
+AC_PROG_CXX
 PKG_PROG_PKG_CONFIG
 AC_C_BIGENDIAN
 
@@ -106,13 +114,19 @@ esac
 
 case "${host}" in
 	*-mingw*|*-winnt*|*-cygwin*)
-		DEBUG_FILE="%TEMP%\opensc-debug.log"
+		DEBUG_FILE="%TEMP%\\\opensc-debug.log"
+		PROFILE_DIR_DEFAULT="obtained from windows registers"
+		PROFILE_DIR="\"\""
 	;;
 	*)
 		DEBUG_FILE="/tmp/opensc-debug.log"
+		PROFILE_DIR="\$(pkgdatadir)"
+		PROFILE_DIR_DEFAULT="\$(pkgdatadir)"
 	;;
 esac
 AC_DEFINE_UNQUOTED([DEBUG_FILE], ["${DEBUG_FILE}"], [Debug file])
+AC_DEFINE_UNQUOTED([PROFILE_DIR], ["${PROFILE_DIR}"], [Directory of profiles])
+AC_DEFINE_UNQUOTED([PROFILE_DIR_DEFAULT], ["${PROFILE_DIR_DEFAULT}"], [Default directory of profiles])
 
 AC_ARG_ENABLE(
 	[strict],
@@ -126,6 +140,13 @@ AC_ARG_ENABLE(
 	[AS_HELP_STRING([--enable-pedantic],[enable pedantic compile mode @<:@disabled@:>@])],
 	,
 	[enable_pedantic="no"]
+)
+
+AC_ARG_ENABLE(
+	[thread_locking],
+	[AS_HELP_STRING([--disable-thread-locking],[disable OS thread locking @<:@enabled@:>@])],
+	,
+	[enable_thread_locking="yes"]
 )
 
 AC_ARG_ENABLE(
@@ -355,6 +376,10 @@ if test "${WIN32}" = "no"; then
 	CC="${PTHREAD_CC}"
 fi
 
+if test "${enable_thread_locking}" = "yes"; then
+	CPPFLAGS="${CPPFLAGS} -DPKCS11_THREAD_LOCKING"
+fi
+
 if test "${enable_minidriver}" = "yes"; then
 	dnl win32 special test for minidriver
 	AC_CHECK_HEADER(
@@ -478,14 +503,16 @@ PKG_CHECK_MODULES(
 case "${enable_openssl}" in
 	no)
 		have_openssl="no"
-		enable_sm="no"
 	;;
 	detect)
+		saved_CFLAGS="${CFLAGS}"
+		CFLAGS="${CFLAGS} ${OPENSSL_CFLAGS}"
+		AC_CHECK_HEADERS([openssl/crypto.h],,[have_openssl="no"])
+		CFLAGS="${saved_CFLAGS}"
 		if test "${have_openssl}" = "yes"; then
 			enable_openssl="yes"
 		else
 			enable_openssl="no"
-			enable_sm="no"
 		fi
 	;;
 esac
@@ -496,6 +523,9 @@ if test "${enable_openssl}" = "yes"; then
 	else
 		AC_MSG_ERROR([OpenSSL linkage required, but no OpenSSL was found])
 	fi
+else
+	OPENSSL_CFLAGS=""
+	OPENSSL_LIBS=""
 fi
 
 if test "${enable_sm}" = "yes"; then
@@ -504,15 +534,19 @@ if test "${enable_sm}" = "yes"; then
 	case "${host}" in
 		*-mingw*|*-winnt*|*-cygwin*)
 			DEFAULT_SM_MODULE="smm-local.dll"
+			DEFAULT_SM_MODULE_PATH="\# module_path = \"\";"
 		;;
 		*-apple-*)
 			DEFAULT_SM_MODULE="libsmm-local.3.dylib"
+			DEFAULT_SM_MODULE_PATH="module_path = \$(libdir);"
 		;;
 		*)
 			DEFAULT_SM_MODULE="libsmm-local.so.3"
+			DEFAULT_SM_MODULE_PATH="module_path = \$(libdir);"
 		;;
 	esac
 	AC_DEFINE_UNQUOTED([DEFAULT_SM_MODULE], ["${DEFAULT_SM_MODULE}"], [Default SM module])
+	AC_DEFINE_UNQUOTED([DEFAULT_SM_MODULE_PATH], ["${DEFAULT_SM_MODULE_PATH}"], [Default SM module path])
 fi
 
 if test "${enable_openct}" = "yes"; then
@@ -538,10 +572,13 @@ if test "${enable_pcsc}" = "yes"; then
 			case "${host}" in
 				*-*-darwin*)
 					# Locate the latest SDK.
-					SDKS_PATH="$(xcode-select -p)/Platforms/MacOSX.platform/Developer/SDKs"
-					SDK_PATH="${SDK_PATH:-$SDKS_PATH/$(ls -1 ${SDKS_PATH} | sort -n -t. -k2 -r | head -1)}"
-					# and set the PC/SC include path
-					PCSC_CFLAGS="-I$SDK_PATH/System/Library/Frameworks/PCSC.framework/Versions/Current/Headers"
+					SDKS_PATH="$(xcode-select --print-path)/Platforms/MacOSX.platform/Developer/SDKs"
+					if test -d $SDKS_PATH; then
+					    SDK_PATH="${SDK_PATH:-$SDKS_PATH/$(ls -1 ${SDKS_PATH} | sort -n -t. -k2 -r | head -1)}"
+					    PCSC_CFLAGS="-I$SDK_PATH/System/Library/Frameworks/PCSC.framework/Versions/Current/Headers"
+					else
+					    PCSC_CFLAGS="-I/System/Library/Frameworks/PCSC.framework/Headers"
+					fi
 				;;
 				*)
 					PCSC_CFLAGS="-I/usr/include/PCSC"
@@ -554,6 +591,7 @@ if test "${enable_pcsc}" = "yes"; then
 	CFLAGS="${CFLAGS} ${PCSC_CFLAGS}"
 	# We must cope with mingw32 that does not have winscard.h mingw64 has it.
 	AC_CHECK_HEADERS([winscard.h],,[test "${WIN32}" != "yes" && AC_MSG_ERROR([winscard.h is required for pcsc])])
+	AC_CHECK_HEADERS([pcsclite.h])
 	CFLAGS="${saved_CFLAGS}"
 
 	if test "${with_pcsc_provider}" = "detect"; then
@@ -579,7 +617,7 @@ fi
 if test "${with_pkcs11_provider}" = "detect"; then
 	case "${host}" in
 		*-*-darwin*)
-			DEFAULT_PKCS11_PROVIDER="opensc-pkcs11.dylib"
+			DEFAULT_PKCS11_PROVIDER="opensc-pkcs11.so"
 		;;
 		*-mingw*|*-winnt*|*-cygwin*)
 			DEFAULT_PKCS11_PROVIDER="opensc-pkcs11.dll"
@@ -611,6 +649,9 @@ if test "${enable_man}" = "yes" -o "${enable_doc}" = "yes"; then
 fi
 
 OPENSC_FEATURES=""
+if test "${enable_thread_locking}" = "yes"; then
+	OPENSC_FEATURES="${OPENSC_FEATURES} locking"
+fi
 if test "${enable_zlib}" = "yes"; then
 	OPENSC_FEATURES="${OPENSC_FEATURES} zlib"
 	OPTIONAL_ZLIB_CFLAGS="${ZLIB_CFLAGS}"
@@ -649,6 +690,9 @@ AC_DEFINE_UNQUOTED([OPENSC_VS_FF_LEGAL_COPYRIGHT], [${OPENSC_VS_FF_LEGAL_COPYRIG
 AC_DEFINE_UNQUOTED([OPENSC_VS_FF_COMPANY_NAME], [${OPENSC_VS_FF_COMPANY_NAME}], [OpenSC version-info CompanyName value])
 AC_DEFINE_UNQUOTED([OPENSC_VS_FF_COMMENTS], [${OPENSC_VS_FF_COMMENTS}], [OpenSC version-info Comments])
 AC_DEFINE_UNQUOTED([OPENSC_VS_FF_PRODUCT_NAME], [${OPENSC_VS_FF_PRODUCT_NAME}], [OpenSC version-info ProductName])
+AC_DEFINE_UNQUOTED([OPENSC_VS_FF_PRODUCT_UPDATES], [${OPENSC_VS_FF_PRODUCT_UPDATES}], [OpenSC version-info UpdateURL])
+AC_DEFINE_UNQUOTED([OPENSC_VS_FF_PRODUCT_URL], [${OPENSC_VS_FF_PRODUCT_URL}], [OpenSC version-info ProductURL])
+AC_DEFINE_UNQUOTED([OPENSC_VS_FF_COMPANY_URL], [${OPENSC_VS_FF_COMPANY_URL}], [OpenSC version-info UpdateURL])
 
 pkcs11dir="\$(libdir)/pkcs11"
 
@@ -662,6 +706,9 @@ AC_SUBST([OPENSC_VS_FF_LEGAL_COPYRIGHT])
 AC_SUBST([OPENSC_VS_FF_COMPANY_NAME])
 AC_SUBST([OPENSC_VS_FF_COMMENTS])
 AC_SUBST([OPENSC_VS_FF_PRODUCT_NAME])
+AC_SUBST([OPENSC_VS_FF_PRODUCT_UPDATES])
+AC_SUBST([OPENSC_VS_FF_PRODUCT_URL])
+AC_SUBST([OPENSC_VS_FF_COMPANY_URL])
 AC_SUBST([OPENSC_LT_CURRENT])
 AC_SUBST([OPENSC_LT_REVISION])
 AC_SUBST([OPENSC_LT_AGE])
@@ -680,9 +727,13 @@ AC_SUBST([OPTIONAL_OPENCT_LIBS])
 AC_SUBST([OPTIONAL_PCSC_CFLAGS])
 AC_SUBST([LIBRARY_BITNESS])
 AC_SUBST([DEFAULT_SM_MODULE])
+AC_SUBST([DEFAULT_SM_MODULE_PATH])
 AC_SUBST([DEBUG_FILE])
+AC_SUBST([PROFILE_DIR])
+AC_SUBST([PROFILE_DIR_DEFAULT])
 
 AM_CONDITIONAL([ENABLE_MAN], [test "${enable_man}" = "yes"])
+AM_CONDITIONAL([ENABLE_THREAD_LOCKING], [test "${enable_thread_locking}" = "yes"])
 AM_CONDITIONAL([ENABLE_ZLIB], [test "${enable_zlib}" = "yes"])
 AM_CONDITIONAL([ENABLE_READLINE], [test "${enable_readline}" = "yes"])
 AM_CONDITIONAL([ENABLE_OPENSSL], [test "${enable_openssl}" = "yes"])
@@ -734,6 +785,7 @@ AC_CONFIG_FILES([
 	src/minidriver/opensc-minidriver.inf
 	win32/Makefile
 	win32/versioninfo.rc
+	win32/versioninfo-customactions.rc
 	win32/winconfig.h
 	win32/OpenSC.iss
 	win32/OpenSC.wxs
@@ -751,13 +803,16 @@ OpenSC has been configured with the following options:
 
 
 Version:                 ${PACKAGE_VERSION}
-Version fix:		 ${OPENSC_VERSION_FIX}
-Version revision:	 ${OPENSC_VERSION_REVISION}
+Version fix:             ${OPENSC_VERSION_FIX}
+Version revision:        ${OPENSC_VERSION_REVISION}
 
 Copyright:               ${OPENSC_VS_FF_LEGAL_COPYRIGHT}
 Company:                 ${OPENSC_VS_FF_COMPANY_NAME}
+Company URL:             ${OPENSC_VS_FF_COMPANY_URL}
 Comments:                ${OPENSC_VS_FF_COMMENTS}
 Product name:            ${OPENSC_VS_FF_PRODUCT_NAME}
+Product updates:         ${OPENSC_VS_FF_PRODUCT_UPDATES}
+Product URL:             ${OPENSC_VS_FF_PRODUCT_URL}
 
 User binaries:           $(eval eval eval echo "${bindir}")
 Configuration files:     $(eval eval eval echo "${sysconfdir}")
@@ -765,6 +820,7 @@ XSL stylesheets:         ${xslstylesheetsdir}
 
 man support:             ${enable_man}
 doc support:             ${enable_doc}
+thread locking support:  ${enable_thread_locking}
 zlib support:            ${enable_zlib}
 readline support:        ${enable_readline}
 OpenSSL support:         ${enable_openssl}

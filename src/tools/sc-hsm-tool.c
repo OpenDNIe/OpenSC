@@ -345,6 +345,7 @@ static int reconstructSecret(secret_share_t *shares, unsigned char t, const BIGN
 		 * multiplication
 		 */
 		if (BN_mod_inverse(&denominator, &denominator, &prime, ctx) == NULL ) {
+			free(bValue);
 			return -1;
 		}
 
@@ -460,27 +461,75 @@ static void print_info(sc_card_t *card, sc_file_t *file)
 	struct sc_pin_cmd_data data;
 	sc_cardctl_sc_hsm_dkek_t dkekinfo;
 
-	u8 major, minor;
+	u8 major, minor, opt;
 
 	major = file->prop_attr[file->prop_attr_len - 2];
 	minor = file->prop_attr[file->prop_attr_len - 1];
 	printf("Version              : %d.%d\n", (int)major, (int)minor);
 
-	/* Try to update PIN info from card */
-	memset(&data, 0, sizeof(data));
-	data.cmd = SC_PIN_CMD_GET_INFO;
-	data.pin_type = SC_AC_CHV;
-	data.pin_reference = ID_USER_PIN;
+	if (file->prop_attr_len > 2) {	/* Version >= 2.0 */
+		opt = file->prop_attr[file->prop_attr_len - 4];
+		if (opt != 0) {
+			printf("Config options       :\n");
+			if (opt & INIT_RRC_ENABLED) {
+				printf("  User PIN reset with SO-PIN enabled\n");
+			}
+			if (opt & INIT_TRANSPORT_PIN) {
+				printf("  Transport-PIN mode enabled\n");
+			}
+		}
 
-	r = sc_pin_cmd(card, &data, &tries_left);
+		/* Try to update SO-PIN info from card */
+		memset(&data, 0, sizeof(data));
+		data.cmd = SC_PIN_CMD_GET_INFO;
+		data.pin_type = SC_AC_CHV;
+		data.pin_reference = ID_SO_PIN;
 
-	if (r == SC_ERROR_REF_DATA_NOT_USABLE) {
-		printf("SmartCard-HSM has never been initialized. Please use --initialize to set SO-PIN and user PIN.\n");
-	} else {
-		if (tries_left == 0) {
-			printf("User PIN locked\n");
+		r = sc_pin_cmd(card, &data, &tries_left);
+		if (r == SC_ERROR_DATA_OBJECT_NOT_FOUND) {
+			printf("SmartCard-HSM has never been initialized. Please use --initialize to set SO-PIN and user PIN.\n");
 		} else {
-			printf("User PIN tries left  : %d\n", tries_left);
+			if (tries_left == 0) {
+				printf("SO-PIN locked\n");
+			} else {
+				printf("SO-PIN tries left    : %d\n", tries_left);
+			}
+			/* Try to update PIN info from card */
+			memset(&data, 0, sizeof(data));
+			data.cmd = SC_PIN_CMD_GET_INFO;
+			data.pin_type = SC_AC_CHV;
+			data.pin_reference = ID_USER_PIN;
+
+			r = sc_pin_cmd(card, &data, &tries_left);
+			if (r == SC_ERROR_CARD_CMD_FAILED) {
+				printf("Public key authentication active.\n");
+			} else if (r == SC_ERROR_REF_DATA_NOT_USABLE) {
+				printf("Transport-PIN active. Please change to user selected PIN first.\n");
+			} else {
+				if (tries_left == 0) {
+					printf("User PIN locked\n");
+				} else {
+					printf("User PIN tries left  : %d\n", tries_left);
+				}
+			}
+		}
+	} else {	/* Version < 2.0 */
+		/* Try to update PIN info from card */
+		memset(&data, 0, sizeof(data));
+		data.cmd = SC_PIN_CMD_GET_INFO;
+		data.pin_type = SC_AC_CHV;
+		data.pin_reference = ID_USER_PIN;
+
+		r = sc_pin_cmd(card, &data, &tries_left);
+
+		if (r == SC_ERROR_REF_DATA_NOT_USABLE) {
+			printf("SmartCard-HSM has never been initialized. Please use --initialize to set SO-PIN and user PIN.\n");
+		} else {
+			if (tries_left == 0) {
+				printf("User PIN locked\n");
+			} else {
+				printf("User PIN tries left  : %d\n", tries_left);
+			}
 		}
 	}
 
@@ -616,6 +665,7 @@ static int recreate_password_from_shares(char **pwd, int *pwdlen, int num_of_pas
 	memset(inbuf, 0, sizeof(inbuf));
 	if (fgets(inbuf, sizeof(inbuf), stdin) == NULL) {
 		fprintf(stderr, "Input aborted\n");
+		free(shares);
 		return -1;
 	}
 	binlen = 64;
@@ -664,6 +714,7 @@ static int recreate_password_from_shares(char **pwd, int *pwdlen, int num_of_pas
 
 	if (r < 0) {
 		printf("\nError during reconstruction of secret. Wrong shares?\n");
+		cleanUpShares(shares, num_of_password_shares);
 		return r;
 	}
 
@@ -708,6 +759,7 @@ static int import_dkek_share(sc_card_t *card, const char *inf, int iter, const c
 
 	if (fread(filebuff, 1, sizeof(filebuff), in) != sizeof(filebuff)) {
 		perror(inf);
+		fclose(in);
 		return -1;
 	}
 
@@ -1019,6 +1071,7 @@ static int create_dkek_share(sc_card_t *card, const char *outf, int iter, const 
 
 	if (fwrite(filebuff, 1, sizeof(filebuff), out) != sizeof(filebuff)) {
 		perror(outf);
+		fclose(out);
 		return -1;
 	}
 
@@ -1240,6 +1293,7 @@ static int wrap_key(sc_card_t *card, int keyid, const char *outf, const char *pi
 	if (fwrite(key, 1, key_len, out) != key_len) {
 		perror(outf);
 		free(key);
+		fclose(out);
 		return -1;
 	}
 

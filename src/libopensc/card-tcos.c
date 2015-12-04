@@ -20,7 +20,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <string.h>
 #include <ctype.h>
@@ -353,6 +355,7 @@ static int tcos_select_file(sc_card_t *card,
 	switch (in_path->type) {
 	case SC_PATH_TYPE_FILE_ID:
 		if (pathlen != 2) return SC_ERROR_INVALID_ARGUMENTS;
+		/* fall through */
 	case SC_PATH_TYPE_FROM_CURRENT:
 		apdu.p1 = 9;
 		break;
@@ -400,6 +403,7 @@ static int tcos_select_file(sc_card_t *card,
 
 	file = sc_file_new();
 	if (file == NULL) SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+	*file_out = file;
 	file->path = *in_path;
 
 	for(i=2; i+1<apdu.resplen && i+1+apdu.resp[i+1]<apdu.resplen; i+=2+apdu.resp[i+1]){
@@ -438,7 +442,6 @@ static int tcos_select_file(sc_card_t *card,
 		}
 	}
 	file->magic = SC_FILE_MAGIC;
-	*file_out = file;
 
 	parse_sec_attr(card, file, file->sec_attr, file->sec_attr_len);
 

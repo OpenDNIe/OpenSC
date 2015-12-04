@@ -16,7 +16,9 @@
 
 /* Initially written by Weitao Sun (weitao@ftsafe.com) 2008 */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 #ifdef ENABLE_OPENSSL	/* empty file without openssl */
 
 #include <stdlib.h>
@@ -466,7 +468,7 @@ static int entersafe_select_fid(sc_card_t *card,
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 
 	/* update cache */
-	if (file->type == SC_FILE_TYPE_DF) {
+	if (file && file->type == SC_FILE_TYPE_DF) {
 		 card->cache.current_path.type = SC_PATH_TYPE_PATH;
 		 card->cache.current_path.value[0] = 0x3f;
 		 card->cache.current_path.value[1] = 0x00;

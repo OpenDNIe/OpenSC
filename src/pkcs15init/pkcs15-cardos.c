@@ -2,7 +2,7 @@
  * CardOS specific operation for PKCS15 initialization
  *
  * Copyright (C) 2005 Nils Larsch <nils@larsch.net>
- * Copyright (C) 2002 Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002 Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -409,7 +409,7 @@ static int
 cardos_delete_object(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 		struct sc_pkcs15_object *obj, const struct sc_path *path)
 {
-	int r, stored_in_ef = 0, algorithm = 0;
+	int r = SC_SUCCESS, stored_in_ef = 0, algorithm = 0;
 	size_t keybits;
 	sc_file_t *file = NULL;
 	struct sc_pkcs15_prkey_info *key_info;

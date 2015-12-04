@@ -275,8 +275,6 @@ struct sc_reader_driver {
 	const char *short_name;
 	struct sc_reader_operations *ops;
 
-	size_t max_send_size; /* Max Lc supported by the reader layer */
-	size_t max_recv_size; /* Mac Le supported by the reader layer */
 	void *dll;
 };
 
@@ -286,6 +284,7 @@ struct sc_reader_driver {
 #define SC_READER_CARD_INUSE		0x00000004
 #define SC_READER_CARD_EXCLUSIVE	0x00000008
 #define SC_READER_HAS_WAITING_AREA	0x00000010
+#define SC_READER_REMOVED			0x00000020
 
 /* reader capabilities */
 #define SC_READER_CAP_DISPLAY	0x00000001
@@ -304,6 +303,8 @@ typedef struct sc_reader {
 
 	unsigned long flags, capabilities;
 	unsigned int supported_protocols, active_protocol;
+	size_t max_send_size; /* Max Lc supported by the reader layer */
+	size_t max_recv_size; /* Mac Le supported by the reader layer */
 
 	struct sc_atr atr;
 	struct _atr_info {
@@ -324,7 +325,7 @@ typedef struct sc_reader {
 #define SC_PIN_CMD_GET_INFO	3
 
 #define SC_PIN_CMD_USE_PINPAD		0x0001
-#define SC_PIN_CMD_NEED_PADDING 	0x0002
+#define SC_PIN_CMD_NEED_PADDING		0x0002
 #define SC_PIN_CMD_IMPLICIT_CHANGE	0x0004
 
 #define SC_PIN_ENCODING_ASCII	0
@@ -334,14 +335,18 @@ typedef struct sc_reader {
 struct sc_pin_cmd_pin {
 	const char *prompt;	/* Prompt to display */
 
-	const u8 *data;		/* PIN, if given by the appliction */
+	const unsigned char *data;		/* PIN, if given by the appliction */
 	int len;		/* set to -1 to get pin from pin pad */
 
-	size_t min_length;	/* min/max length of PIN */
-	size_t max_length;
+	size_t min_length;	/* min length of PIN */
+	size_t max_length;	/* max length of PIN */
+	size_t stored_length;	/* stored length of PIN */
+
 	unsigned int encoding;	/* ASCII-numeric, BCD, etc */
+
 	size_t pad_length;	/* filled in by the card driver */
-	u8 pad_char;
+	unsigned char pad_char;
+
 	size_t offset;		/* PIN offset in the APDU */
 	size_t length_offset;	/* Effective PIN length offset in the APDU */
 
@@ -362,73 +367,6 @@ struct sc_pin_cmd_data {
 
 	struct sc_apdu *apdu;		/* APDU of the PIN command */
 };
-
-#if 0
-#define PACE_PIN_ID_MRZ 0x01
-#define PACE_PIN_ID_CAN 0x02
-#define PACE_PIN_ID_PIN 0x03
-#define PACE_PIN_ID_PUK 0x04
-/**
- * Input data for EstablishPACEChannel()
- */
-struct establish_pace_channel_input {
-    /** Type of secret (CAN, MRZ, PIN or PUK). */
-    unsigned char pin_id;
-
-    /** Length of \a chat */
-    size_t chat_length;
-    /** Card holder authorization template */
-    const unsigned char *chat;
-
-    /** Length of \a pin */
-    size_t pin_length;
-    /** Secret */
-    const unsigned char *pin;
-
-    /** Length of \a certificate_description */
-    size_t certificate_description_length;
-    /** Certificate description */
-    const unsigned char *certificate_description;
-};
-
-/**
- * Output data for EstablishPACEChannel()
- */
-struct establish_pace_channel_output {
-    /** PACE result (TR-03119) */
-    unsigned int result;
-
-    /** MSE: Set AT status byte */
-    unsigned char mse_set_at_sw1;
-    /** MSE: Set AT status byte */
-    unsigned char mse_set_at_sw2;
-
-    /** Length of \a ef_cardaccess */
-    size_t ef_cardaccess_length;
-    /** EF.CardAccess */
-    unsigned char *ef_cardaccess;
-
-    /** Length of \a recent_car */
-    size_t recent_car_length;
-    /** Most recent certificate authority reference */
-    unsigned char *recent_car;
-
-    /** Length of \a previous_car */
-    size_t previous_car_length;
-    /** Previous certificate authority reference */
-    unsigned char *previous_car;
-
-    /** Length of \a id_icc */
-    size_t id_icc_length;
-    /** ICC identifier */
-    unsigned char *id_icc;
-
-    /** Length of \a id_pcd */
-    size_t id_pcd_length;
-    /** PCD identifier */
-    unsigned char *id_pcd;
-};
-#endif
 
 struct sc_reader_operations {
 	/* Called during sc_establish_context(), when the driver
@@ -500,6 +438,9 @@ struct sc_reader_operations {
 
 /* Card has on-board random number source. */
 #define SC_CARD_CAP_RNG			0x00000004
+
+/* Card supports ISO7816 PIN status queries using an empty VERIFY */
+#define SC_CARD_CAP_ISO7816_PIN_INFO	0x00000008
 
 /* Use the card's ACs in sc_pkcs15init_authenticate(),
  * instead of relying on the ACL info in the profile files. */
@@ -701,13 +642,25 @@ typedef struct {
 	unsigned long (*thread_id)(void);
 } sc_thread_context_t;
 
+/** Stop modifing or using external resources
+ *
+ * Currently this is used to avoid freeing duplicated external resources for a
+ * process that has been forked. For example, a child process may want to leave
+ * the duplicated card handles for the parent process. With this flag the child
+ * process indicates that shall the reader shall ignore those resources when
+ * calling sc_disconnect_card.
+ */
+#define SC_CTX_FLAG_TERMINATE				0x00000001
+#define SC_CTX_FLAG_PARANOID_MEMORY			0x00000002
+#define SC_CTX_FLAG_DEBUG_MEMORY			0x00000004
+#define SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER	0x00000008
+
 typedef struct sc_context {
 	scconf_context *conf;
 	scconf_block *conf_blocks[3];
 	char *app_name;
 	int debug;
-	int paranoid_memory;
-	int enable_default_driver;
+	unsigned long flags;
 
 	FILE *debug_file;
 	char *debug_filename;
@@ -781,7 +734,7 @@ typedef struct {
 	 *  dependend configuration data). If NULL the name "default"
 	 *  will be used. */
 	const char    *app_name;
-	/** flags, currently unused */
+	/** context flags */
 	unsigned long flags;
 	/** mutex functions to use (optional) */
 	sc_thread_context_t *thread_ctx;
@@ -864,6 +817,8 @@ sc_reader_t *sc_ctx_get_reader_by_id(sc_context_t *ctx, unsigned int id);
  * @return the number of available reader objects
  */
 unsigned int sc_ctx_get_reader_count(sc_context_t *ctx);
+
+int _sc_delete_reader(sc_context_t *ctx, sc_reader_t *reader);
 
 /**
  * Redirects OpenSC debug log to the specified file
@@ -957,6 +912,30 @@ int sc_lock(struct sc_card *card);
  * @retval SC_SUCCESS on success
  */
 int sc_unlock(struct sc_card *card);
+
+/**
+ * @brief Calculate the maximum size of R-APDU payload (Ne).
+ *
+ * Takes card limitations into account such as extended length support as well
+ * as the reader's limitation for data transfer.
+ *
+ * @param card Initialized card object with its reader
+ *
+ * @return maximum Ne
+ */
+size_t sc_get_max_recv_size(const sc_card_t *card);
+
+/**
+ * @brief Calculate the maximum size of C-APDU payload (Nc).
+ *
+ * Takes card limitations into account such as extended length support as well
+ * as the reader's limitation for data transfer.
+ *
+ * @param card
+ *
+ * @return maximum Nc
+ */
+size_t sc_get_max_send_size(const sc_card_t *card);
 
 
 /********************************************************************/

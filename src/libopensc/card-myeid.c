@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -158,7 +160,8 @@ static int myeid_init(struct sc_card *card)
 			card->version.fw_major >= 4)   {
 		int i;
 
-	        flags |= SC_ALGORITHM_ECDSA_RAW;
+		flags = SC_ALGORITHM_ECDSA_RAW | SC_ALGORITHM_ECDH_CDH_RAW | SC_ALGORITHM_ONBOARD_KEY_GEN;
+		flags |= SC_ALGORITHM_ECDSA_HASH_NONE | SC_ALGORITHM_ECDSA_HASH_SHA1;
 		ext_flags = SC_ALGORITHM_EXT_EC_NAMEDCURVE | SC_ALGORITHM_EXT_EC_UNCOMPRESES;
 
 		for (i=0; ec_curves[i].curve_name != NULL; i++)
@@ -167,7 +170,7 @@ static int myeid_init(struct sc_card *card)
 #endif
 
 	/* State that we have an RNG */
-	card->caps |= SC_CARD_CAP_RNG;
+	card->caps |= SC_CARD_CAP_RNG | SC_CARD_CAP_ISO7816_PIN_INFO;
 
 	card->max_recv_size = 255;
 	card->max_send_size = 255;
@@ -260,16 +263,10 @@ static void parse_sec_attr(struct sc_file *file, const u8 *buf, size_t len)
 static int myeid_select_file(struct sc_card *card, const struct sc_path *in_path,
 		struct sc_file **file)
 {
-	struct sc_file *dummy_file = NULL;
 	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
-	r = iso_ops->select_file(card, in_path, &dummy_file);
-
-	if (file)
-		*file = dummy_file;
-	else  if (dummy_file)
-		sc_file_free(dummy_file);
+	r = iso_ops->select_file(card, in_path, file);
 
 	if (r == 0 && file != NULL && *file != NULL)
 		parse_sec_attr(*file, (*file)->sec_attr, (*file)->sec_attr_len);
@@ -521,53 +518,12 @@ static int myeid_delete_file(struct sc_card *card, const struct sc_path *path)
 	LOG_FUNC_RETURN(card->ctx, sc_check_sw(card, apdu.sw1, apdu.sw2));
 }
 
-static int myeid_pin_info(sc_card_t *card, struct sc_pin_cmd_data *data,
-			   int *tries_left)
-{
-	sc_apdu_t apdu;
-	int r;
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0x20, 0x00, data->pin_reference);
-
-	r = sc_transmit_apdu(card, &apdu);
-	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
-
-	r =  sc_check_sw(card, apdu.sw1, apdu.sw2);
-
-	if (r == SC_ERROR_PIN_CODE_INCORRECT) {
-		data->pin1.tries_left = apdu.sw2 & 0xF;
-		r = SC_SUCCESS;
-	} else if (r == SC_ERROR_AUTH_METHOD_BLOCKED) {
-		data->pin1.tries_left = 0;
-		r = SC_SUCCESS;
-	}
-	LOG_TEST_RET(card->ctx, r, "Check SW error");
-
-	if (r == SC_SUCCESS)
-	{
-		data->pin1.pad_length = data->pin2.pad_length = 8;
-	        data->pin1.pad_char = data->pin2.pad_char = 0xFF;
-	}
-
-
-	if (tries_left != NULL) {
-		*tries_left = data->pin1.tries_left;
-	}
-
-	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
-}
-
 static int myeid_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 			 int *tries_left)
 {
 	myeid_private_data_t *priv = (myeid_private_data_t *) card->drv_data;
 
 	LOG_FUNC_CALLED(card->ctx);
-
-	if (data->cmd == SC_PIN_CMD_GET_INFO)
-	{
-	        return myeid_pin_info(card, data, tries_left);
-	}
 
 	sc_log(card->ctx, "ref (%d), pin1 len(%d), pin2 len (%d)\n",
 	              data->pin_reference, data->pin1.len, data->pin2.len);
@@ -824,6 +780,8 @@ myeid_convert_ec_signature(struct sc_context *ctx, size_t s_len, unsigned char *
 	buflen = (s_len + 7)/8*2;
 
 	r = sc_asn1_sig_value_sequence_to_rs(ctx, data, datalen, buf, buflen);
+	if (r < 0)
+		free(buf);
         LOG_TEST_RET(ctx, r, "Failed to cenvert Sig-Value to the raw RS format");
 
 	if (buflen > datalen)

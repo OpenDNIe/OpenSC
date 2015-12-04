@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <assert.h>
 #include <stdlib.h>
@@ -133,6 +135,54 @@ static void sc_card_free(sc_card_t *card)
 	free(card);
 }
 
+size_t sc_get_max_recv_size(const sc_card_t *card)
+{
+	size_t max_recv_size;
+	assert(card != NULL && card->reader != NULL);
+	max_recv_size = card->max_recv_size;
+
+	/* initialize max_recv_size to a meaningfull value */
+	if (card->caps & SC_CARD_CAP_APDU_EXT) {
+		if (!max_recv_size)
+			max_recv_size = 65536;
+	} else {
+		if (!max_recv_size)
+			max_recv_size = 256;
+	}
+
+	/*  Override card limitations with reader limitations. */
+	if (card->reader->max_recv_size != 0
+			&& (card->reader->max_recv_size < card->max_recv_size))
+		max_recv_size = card->reader->max_recv_size;
+
+	return max_recv_size;
+}
+
+size_t sc_get_max_send_size(const sc_card_t *card)
+{
+	size_t max_send_size;
+
+	assert(card != NULL && card->reader != NULL);
+
+	max_send_size = card->max_send_size;
+
+	/* initialize max_send_size to a meaningfull value */
+	if (card->caps & SC_CARD_CAP_APDU_EXT) {
+		if (!max_send_size)
+			max_send_size = 65535;
+	} else {
+		if (!max_send_size)
+			max_send_size = 255;
+	}
+
+	/*  Override card limitations with reader limitations. */
+	if (card->reader->max_send_size != 0
+			&& (card->reader->max_send_size < card->max_send_size))
+		max_send_size = card->reader->max_send_size;
+
+	return max_send_size;
+}
+
 int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 {
 	sc_card_t *card;
@@ -190,10 +240,14 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 	}
 
 	if (driver != NULL) {
-		/* Forced driver, or matched via ATR mapping from
-		 * config file */
+		/* Forced driver, or matched via ATR mapping from config file */
 		card->driver = driver;
+
 		memcpy(card->ops, card->driver->ops, sizeof(struct sc_card_operations));
+		if (card->ops->match_card != NULL)
+			if (card->ops->match_card(card) != 1)
+				sc_log(ctx, "driver '%s' match_card() failed: %s (will continue anyway)", card->driver->name, sc_strerror(r));
+
 		if (card->ops->init != NULL) {
 			r = card->ops->init(card);
 			if (r) {
@@ -212,7 +266,8 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 			if (ops == NULL || ops->match_card == NULL)   {
 				continue;
 			}
-			else if (!ctx->enable_default_driver && !strcmp("default", drv->short_name))   {
+			else if (!(ctx->flags & SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER)
+				   	&& !strcmp("default", drv->short_name))   {
 				sc_log(ctx , "ignore 'default' card driver");
 				continue;
 			}
@@ -244,16 +299,9 @@ int sc_connect_card(sc_reader_t *reader, sc_card_t **card_out)
 	if (card->name == NULL)
 		card->name = card->driver->name;
 
-	/*  Override card limitations with reader limitations.
-	 *  Note that zero means no limitations at all.
-	 */
-	if ((card->max_recv_size == 0) ||
-			((reader->driver->max_recv_size != 0) && (reader->driver->max_recv_size < card->max_recv_size)))
-		card->max_recv_size = reader->driver->max_recv_size;
-
-	if ((card->max_send_size == 0) ||
-			((reader->driver->max_send_size != 0) && (reader->driver->max_send_size < card->max_send_size)))
-		card->max_send_size = reader->driver->max_send_size;
+	/* initialize max_send_size/max_recv_size to a meaningfull value */
+	card->max_recv_size = sc_get_max_recv_size(card);
+	card->max_send_size = sc_get_max_send_size(card);
 
 	sc_log(ctx, "card info name:'%s', type:%i, flags:0x%X, max_send/recv_size:%i/%i",
 		card->name, card->type, card->flags, card->max_send_size, card->max_recv_size);
@@ -472,7 +520,7 @@ int sc_delete_file(sc_card_t *card, const sc_path_t *path)
 int sc_read_binary(sc_card_t *card, unsigned int idx,
 		   unsigned char *buf, size_t count, unsigned long flags)
 {
-	size_t max_le = card->max_recv_size > 0 ? card->max_recv_size : 256;
+	size_t max_le = sc_get_max_recv_size(card);
 	int r;
 
 	assert(card != NULL && card->ops != NULL && buf != NULL);
@@ -522,7 +570,7 @@ int sc_read_binary(sc_card_t *card, unsigned int idx,
 int sc_write_binary(sc_card_t *card, unsigned int idx,
 		    const u8 *buf, size_t count, unsigned long flags)
 {
-	size_t max_lc = card->max_send_size > 0 ? card->max_send_size : 255;
+	size_t max_lc = sc_get_max_send_size(card);
 	int r;
 
 	assert(card != NULL && card->ops != NULL && buf != NULL);
@@ -565,7 +613,7 @@ int sc_write_binary(sc_card_t *card, unsigned int idx,
 int sc_update_binary(sc_card_t *card, unsigned int idx,
 		     const u8 *buf, size_t count, unsigned long flags)
 {
-	size_t max_lc = card->max_send_size > 0 ? card->max_send_size : 255;
+	size_t max_lc = sc_get_max_send_size(card);
 	int r;
 
 	assert(card != NULL && card->ops != NULL && buf != NULL);
@@ -641,6 +689,12 @@ int sc_select_file(sc_card_t *card, const sc_path_t *in_path,  sc_file_t **file)
 	if (r != SC_SUCCESS)
 		pbuf[0] = '\0';
 
+	/* FIXME We should be a bit less strict and let the upper layers do
+	 * the initialization (including reuse of existing file objects). We
+	 * implemented this here because we are lazy. */
+	if (file != NULL)
+		*file = NULL;
+
 	sc_log(card->ctx, "called; type=%d, path=%s", in_path->type, pbuf);
 	if (in_path->len > SC_MAX_PATH_SIZE)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
@@ -665,9 +719,16 @@ int sc_select_file(sc_card_t *card, const sc_path_t *in_path,  sc_file_t **file)
 	r = card->ops->select_file(card, in_path, file);
 	LOG_TEST_RET(card->ctx, r, "'SELECT' error");
 
-	/* Remember file path */
-	if (file && *file)
-		(*file)->path = *in_path;
+	if (file) {
+		if (*file)
+			/* Remember file path */
+			(*file)->path = *in_path;
+		else
+			/* FIXME We should be a bit less strict and let the upper layers do
+			 * the error checking. We implemented this here because we are
+			 * lazy.  */
+			r = SC_ERROR_INVALID_DATA;
+	}
 
 	LOG_FUNC_RETURN(card->ctx, r);
 }
@@ -859,7 +920,7 @@ static sc_algorithm_info_t * sc_card_find_alg(sc_card_t *card,
 			continue;
 		if (param)   {
 			if (info->algorithm == SC_ALGORITHM_EC)
-				if(sc_compare_oid((struct sc_object_id *)param, &info->u._ec.params.id))
+				if(!sc_compare_oid((struct sc_object_id *)param, &info->u._ec.params.id))
 					continue;
 		}
 		return info;

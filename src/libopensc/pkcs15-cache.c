@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,13 +115,16 @@ int sc_pkcs15_read_cached_file(struct sc_pkcs15_card *p15card,
 		return SC_ERROR_FILE_NOT_FOUND;
 	}
 	if (offset) {
-		if (0 != fseek(f, (long)offset, SEEK_SET))
+		if (0 != fseek(f, (long)offset, SEEK_SET)) {
+			fclose(f);
+			free(data);
 			return SC_ERROR_FILE_NOT_FOUND;
+		}
 	}
 	if (data)
 		*buf = data;
 	got = fread(*buf, 1, count, f);
-        fclose(f);
+	fclose(f);
 	if (got != count) {
 		if (data)
 			free(data);

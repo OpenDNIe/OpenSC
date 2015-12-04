@@ -22,13 +22,22 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <ctype.h>
-#include <stdlib.h>
-#include <string.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #ifdef ENABLE_OPENSSL
 	/* openssl only needed for card administration */
 #include <openssl/evp.h>
@@ -439,6 +448,7 @@ static int piv_general_io(sc_card_t *card, int ins, int p1, int p2,
 	unsigned int cla_out, tag_out;
 	const u8 *body;
 	size_t bodylen;
+	int find_len = 0;
 
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
@@ -463,6 +473,11 @@ static int piv_general_io(sc_card_t *card, int ins, int p1, int p2,
 			recvbuf ? SC_APDU_CASE_4_SHORT: SC_APDU_CASE_3_SHORT,
 			ins, p1, p2);
 	apdu.flags |= SC_APDU_FLAGS_CHAINING;
+	/* if looking for length of object, dont try and read the rest of buffer here */
+	if (rbuflen == 8 && card->reader->active_protocol == SC_PROTO_T1) {
+		apdu.flags |= SC_APDU_FLAGS_NO_GET_RESP;
+		find_len = 1;
+	}
 
 	apdu.lc = sendbuflen;
 	apdu.datalen = sendbuflen;
@@ -491,7 +506,9 @@ static int piv_general_io(sc_card_t *card, int ins, int p1, int p2,
 		goto err;
 	}
 
-	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	if (!(find_len && apdu.sw1 == 0x61))  {
+	    r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	}
 
 /* TODO: - DEE look later at tag vs size read too */
 	if (r < 0) {
@@ -712,9 +729,6 @@ static int piv_find_aid(sc_card_t * card, sc_file_t *aid_file)
 	/* first  see if the default applcation will return a template
 	 * that we know about.
 	 */
-
-	if (card->type == SC_CARD_TYPE_PIV_II_GENERIC)
-		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, 0);
 
 	r = piv_select_aid(card, piv_aids[0].value, piv_aids[0].len_short, rbuf, &resplen);
 	if (r >= 0 && resplen > 2 ) {
@@ -1162,13 +1176,13 @@ static int piv_read_binary(sc_card_t *card, unsigned int idx,
 
 	if ( rbuflen < idx + count)
 		count = rbuflen - idx;
-		if (count <= 0) {
-			r = 0;
-			priv->rwb_state = 1;
-		} else {
-			memcpy(buf, rbuf + idx, count);
-			r = count;
-		}
+	if (count <= 0) {
+		r = 0;
+		priv->rwb_state = 1;
+	} else {
+		memcpy(buf, rbuf + idx, count);
+		r = count;
+	}
 err:
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
 }
@@ -1381,7 +1395,6 @@ static const EVP_CIPHER *get_cipher_for_algo(int alg_id)
 		default: return NULL;
 	}
 }
-#endif
 
 static int get_keylen(unsigned int alg_id, size_t *size)
 {
@@ -1440,9 +1453,17 @@ static int piv_get_key(sc_card_t *card, unsigned int alg_id, u8 **key, size_t *l
 		goto err;
 	}
 
-	fseek(f, 0L, SEEK_END);
+	if (0 > fseek(f, 0L, SEEK_END))
+		r = SC_ERROR_INTERNAL;
 	fsize = ftell(f);
-	fseek(f, 0L, SEEK_SET);
+	if (0 > (long) fsize)
+		r = SC_ERROR_INTERNAL;
+	if (0 > fseek(f, 0L, SEEK_SET))
+		r = SC_ERROR_INTERNAL;
+	if(r) {
+		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not read %s\n", keyfilename);
+		goto err;
+	}
 
 	keybuf = malloc(fsize+1); /* if not binary, need null to make it a string */
 	if (!keybuf) {
@@ -1498,6 +1519,7 @@ err:
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
 	return r;
 }
+#endif
 
 /*
  * will only deal with 3des for now
@@ -2425,15 +2447,16 @@ static int piv_select_file(sc_card_t *card, const sc_path_t *in_path,
 	pathlen = in_path->len;
 
 	/* only support single EF in current application */
+	/* 
+	 * PIV emulates files, and only does so becauses sc_pkcs15_* uses
+	 * select_file and read_binary. The emulation adds path emulated structures
+	 * so piv_select_file will find it.
+	 * there is no dir. Only direct access to emulated files
+	 * thus opensc-tool and opensc-explorer can not read the emulated files
+	 */
 
 	if (memcmp(path, "\x3F\x00", 2) == 0) {
-		if (pathlen == 2)   {
-			r = piv_select_aid(card, piv_aids[0].value, piv_aids[0].len_short, NULL, NULL);
-			SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Cannot select PIV AID");
-
-			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
-		}
-		else if (pathlen > 2) {
+		if (pathlen > 2) {
 			path += 2;
 			pathlen -= 2;
 		}
@@ -2879,13 +2902,13 @@ static int piv_init(sc_card_t *card)
 	_sc_card_add_rsa_alg(card, 2048, flags, 0); /* optional */
 	_sc_card_add_rsa_alg(card, 3072, flags, 0); /* optional */
 
-	flags = SC_ALGORITHM_ECDSA_RAW;
+	flags = SC_ALGORITHM_ECDSA_RAW | SC_ALGORITHM_ECDH_CDH_RAW | SC_ALGORITHM_ECDSA_HASH_NONE;
 	ext_flags = SC_ALGORITHM_EXT_EC_NAMEDCURVE | SC_ALGORITHM_EXT_EC_UNCOMPRESES;
 
 	_sc_card_add_ec_alg(card, 256, flags, ext_flags, NULL);
 	_sc_card_add_ec_alg(card, 384, flags, ext_flags, NULL);
 
-	card->caps |= SC_CARD_CAP_RNG;
+	card->caps |= SC_CARD_CAP_RNG | SC_CARD_CAP_ISO7816_PIN_INFO;
 
 	/*
 	 * 800-73-3 cards may have a history object and/or a discovery object
@@ -2899,6 +2922,27 @@ static int piv_init(sc_card_t *card)
 	if (r > 0)
 		r = 0;
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+}
+
+
+static int piv_check_sw(struct sc_card *card, unsigned int sw1, unsigned int sw2)
+{
+	struct sc_card_driver *iso_drv = sc_get_iso7816_driver();
+
+	const u8 *yubikey_neo_atr =
+		(const u8*)"\x3B\xFC\x13\x00\x00\x81\x31\xFE\x15\x59\x75\x62\x69\x6B\x65\x79\x4E\x45\x4F\x72\x33\xE1";
+	if (card->atr.len != 22 || memcmp(card->atr.value, yubikey_neo_atr, 22) != 0)
+		return iso_drv->ops->check_sw(card, sw1, sw2);
+
+	/* Handle here the Yubikey NEO, which returns 0x0X rather than 0xCX to
+	 * indicate the number of remaining PIN retries.  Perhaps they misread the
+	 * spec and thought 0xCX meant "clear" or "don't care", not a literal 0xC! */
+	if (sw1 == 0x63U && (sw2 & ~0x0fU) == 0x00U && sw2 != 0) {
+		 sc_log(card->ctx, "Verification failed (remaining tries: %d)", (sw2 & 0x0f));
+		 return SC_ERROR_PIN_CODE_INCORRECT;
+	}
+
+	return iso_drv->ops->check_sw(card, sw1, sw2);
 }
 
 
@@ -2942,6 +2986,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	piv_ops.restore_security_env = piv_restore_security_env;
 	piv_ops.compute_signature = piv_compute_signature;
 	piv_ops.decipher =  piv_decipher;
+	piv_ops.check_sw = piv_check_sw;
 	piv_ops.card_ctl = piv_card_ctl;
 	piv_ops.pin_cmd = piv_pin_cmd;
 

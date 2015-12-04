@@ -12,7 +12,7 @@
  * a generic implementation; that is how PINs and keys are stored
  * on the card. These should be implemented in pkcs15-<cardname>.c
  *
- * Copyright (C) 2002, Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002, Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -727,10 +727,6 @@ sc_pkcs15init_finalize_profile(struct sc_card *card, struct sc_profile *profile,
 	if (aid)   {
 		sc_log(ctx, "finalize profile for AID %s", sc_dump_hex(aid->value, aid->len));
 		app = sc_find_app(card, aid);
-		if (!app)   {
-			sc_log(ctx, "Cannot find oncard application");
-			LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
-		}
 	}
 	else if (card->app_count == 1) {
 		app = card->app[0];
@@ -813,7 +809,7 @@ sc_pkcs15init_add_app(struct sc_card *card, struct sc_profile *profile,
 			 * For this, create a 'virtual' AUTH object 'SO PIN', accessible by the card specific part,
 			 * but not yet written into the on-card PKCS#15.
 			 */
-			sc_log(ctx, "Add virtual SO_PIN('%s',flags:%X,reference:%i,path:'%s')", pin_obj->label,
+			sc_log(ctx, "Add virtual SO_PIN('%.*s',flags:%X,reference:%i,path:'%s')", (int) sizeof pin_obj->label, pin_obj->label,
 					pin_attrs->flags, pin_attrs->reference, sc_print_path(&pin_ainfo.path));
 			r = sc_pkcs15_add_object(p15card, pin_obj);
 			LOG_TEST_RET(ctx, r, "Failed to add 'SOPIN' AUTH object");
@@ -953,8 +949,10 @@ sc_pkcs15init_store_puk(struct sc_pkcs15_card *p15card,
 	/* Now store the PINs */
 	if (profile->ops->create_pin)
 		r = sc_pkcs15init_create_pin(p15card, profile, pin_obj, args);
-	else
+	else {
+		sc_pkcs15_free_object(pin_obj);
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "In Old API store PUK object is not supported");
+	}
 
 	if (r >= 0)
 		r = sc_pkcs15init_add_object(p15card, profile, SC_PKCS15_AODF, pin_obj);
@@ -1009,7 +1007,7 @@ sc_pkcs15init_store_pin(struct sc_pkcs15_card *p15card, struct sc_profile *profi
 	auth_info->auth_id = args->auth_id;
 
 	/* Now store the PINs */
-	sc_log(ctx, "Store PIN(%s,authID:%s)", pin_obj->label, sc_pkcs15_print_id(&auth_info->auth_id));
+	sc_log(ctx, "Store PIN(%.*s,authID:%s)", (int) sizeof pin_obj->label, pin_obj->label, sc_pkcs15_print_id(&auth_info->auth_id));
 	r = sc_pkcs15init_create_pin(p15card, profile, pin_obj, args);
 	if (r < 0)
 		sc_pkcs15_free_object(pin_obj);
@@ -1152,14 +1150,16 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 	struct sc_context *ctx = p15card->card->ctx;
 	struct sc_pkcs15_prkey_info *key_info;
 	struct sc_pkcs15_keyinfo_gostparams *keyinfo_gostparams;
-	struct sc_pkcs15_object *object;
+	struct sc_pkcs15_object *object = NULL;
 	const char	*label;
 	unsigned int	usage;
 	int		r = 0, key_type;
 
 	LOG_FUNC_CALLED(ctx);
-	if (!res_obj || !keybits)
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Initialize PrKDF entry failed");
+	if (!res_obj || !keybits) {
+		r = SC_ERROR_INVALID_ARGUMENTS;
+		LOG_TEST_GOTO_ERR(ctx, r, "Initialize PrKDF entry failed");
+	}
 
 	*res_obj = NULL;
 
@@ -1176,11 +1176,12 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 	 * If we find out below that we're better off reusing an
 	 * existing object, we'll ditch this one */
 	key_type = prkey_pkcs15_algo(p15card, key);
-	LOG_TEST_RET(ctx, key_type, "Unsupported key type");
+	r = key_type;
+	LOG_TEST_GOTO_ERR(ctx, r, "Unsupported key type");
 
 	object = sc_pkcs15init_new_object(key_type, label, &keyargs->auth_id, NULL);
 	if (object == NULL)
-		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate new PrKey object");
+		LOG_TEST_GOTO_ERR(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate new PrKey object");
 
 	key_info = (struct sc_pkcs15_prkey_info *) object->data;
 	key_info->usage = usage;
@@ -1198,7 +1199,7 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 	/* Select a Key ID if the user didn't specify one,
 	 * otherwise make sure it's compatible with our intended use */
 	r = select_id(p15card, SC_PKCS15_TYPE_PRKEY, &keyargs->id);
-	LOG_TEST_RET(ctx, r, "Cannot select ID for PrKey object");
+	LOG_TEST_GOTO_ERR(ctx, r, "Cannot select ID for PrKey object");
 
 	key_info->id = keyargs->id;
 
@@ -1207,8 +1208,10 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 		/* FIXME: malloc() call in pkcs15init, but free() call
 		 * in libopensc (sc_pkcs15_free_prkey_info) */
 		key_info->params.data = malloc(key_info->params.len);
-		if (!key_info->params.data)
-			LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate memory for GOST parameters");
+		if (!key_info->params.data) {
+			r = SC_ERROR_OUT_OF_MEMORY;
+			LOG_TEST_GOTO_ERR(ctx, r, "Cannot allocate memory for GOST parameters");
+		}
 		keyinfo_gostparams = key_info->params.data;
 		keyinfo_gostparams->gostr3410 = keyargs->params.gost.gostr3410;
 		keyinfo_gostparams->gostr3411 = keyargs->params.gost.gostr3411;
@@ -1219,17 +1222,18 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 		key_info->params.data = &keyargs->key.u.ec.params;
 		key_info->params.free_params = sc_pkcs15init_empty_callback;
 		key_info->field_length = ecparams->field_length;
+		key_info->modulus_length = 0;
 	}
 
 	r = select_object_path(p15card, profile, object, &key_info->path);
-	LOG_TEST_RET(ctx, r, "Failed to select private key object path");
+	LOG_TEST_GOTO_ERR(ctx, r, "Failed to select private key object path");
 
 	/* See if we need to select a key reference for this object */
 	if (profile->ops->select_key_reference) {
 		while (1) {
 			sc_log(ctx, "Look for usable key reference starting from %i", key_info->key_reference);
 			r = profile->ops->select_key_reference(profile, p15card, key_info);
-			LOG_TEST_RET(ctx, r, "Failed to select card specific key reference");
+			LOG_TEST_GOTO_ERR(ctx, r, "Failed to select card specific key reference");
 
 			r = sc_pkcs15_find_prkey_by_reference(p15card, &key_info->path, key_info->key_reference, NULL);
 			if (r == SC_ERROR_OBJECT_NOT_FOUND)   {
@@ -1237,17 +1241,24 @@ sc_pkcs15init_init_prkdf(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 				break;
 			}
 
-			if (r != 0)
+			if (r != 0) {
 				/* Other error trying to retrieve pin obj */
-				LOG_TEST_RET(ctx, SC_ERROR_TOO_MANY_OBJECTS, "Failed to select key reference");
+				r = SC_ERROR_TOO_MANY_OBJECTS;
+				LOG_TEST_GOTO_ERR(ctx, r, "Failed to select key reference");
+			}
 
 			key_info->key_reference++;
 		}
 	}
 
 	*res_obj = object;
+	object = NULL;
+	r = SC_SUCCESS;
 
-	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+err:
+	if (object)
+		sc_pkcs15init_free_object(object);
+	LOG_FUNC_RETURN(ctx, r);
 }
 
 
@@ -1295,16 +1306,6 @@ sc_pkcs15init_generate_key(struct sc_pkcs15_card *p15card, struct sc_profile *pr
 	LOG_TEST_RET(ctx, r, "Set up private key object error");
 
 	key_info = (struct sc_pkcs15_prkey_info *) object->data;
-
-	if (keygen_args->prkey_args.guid && keygen_args->prkey_args.guid_len)   {
-		key_info->cmap_record.guid = malloc(keygen_args->prkey_args.guid_len);
-		if (!key_info->cmap_record.guid)
-			LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate guid");
-		memcpy(key_info->cmap_record.guid, keygen_args->prkey_args.guid, keygen_args->prkey_args.guid_len);
-		key_info->cmap_record.guid_len = keygen_args->prkey_args.guid_len;
-		sc_log(ctx, "new key GUID: 0x'%s'", sc_dump_hex(key_info->cmap_record.guid, key_info->cmap_record.guid_len));
-		key_info->cmap_record.flags = SC_MD_CONTAINER_MAP_VALID_CONTAINER;
-	}
 
 	/* Set up the PuKDF info. The public key will be filled in
 	 * by the card driver's generate_key function called below.
@@ -1543,7 +1544,7 @@ sc_pkcs15init_store_public_key(struct sc_pkcs15_card *p15card, struct sc_profile
 		 * in libopensc (sc_pkcs15_free_prkey_info) */
 		key_info->params.data = malloc(key_info->params.len);
 		if (!key_info->params.data) {
-			/* FIXME free object with sc_pkcs15init_delete_object */
+			sc_pkcs15init_free_object(object);
 			LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate GOST params");
 		}
 		keyinfo_gostparams = key_info->params.data;
@@ -1556,6 +1557,7 @@ sc_pkcs15init_store_public_key(struct sc_pkcs15_card *p15card, struct sc_profile
 		if (key.u.ec.params.der.value) {
 			key_info->params.data = malloc(key.u.ec.params.der.len);
 			if (!key_info->params.data) {
+				sc_pkcs15init_free_object(object);
 				LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot allocate EC params");
 			}
 			key_info->params.len = key.u.ec.params.der.len;
@@ -1630,10 +1632,13 @@ sc_pkcs15init_store_certificate(struct sc_pkcs15_card *p15card,
 	struct sc_pkcs15_cert_info *cert_info = NULL;
 	struct sc_pkcs15_object *object = NULL;
 	struct sc_pkcs15_object *key_object = NULL;
+	struct sc_path existing_path;
 	const char *label = NULL;
 	int		r;
 
 	LOG_FUNC_CALLED(ctx);
+
+	memset(&existing_path, 0, sizeof(struct sc_path));
 
 	label = args->label;
 	if (!label)
@@ -1642,10 +1647,25 @@ sc_pkcs15init_store_certificate(struct sc_pkcs15_card *p15card,
 	r = sc_pkcs15init_select_intrinsic_id(p15card, profile, SC_PKCS15_TYPE_CERT_X509,
 			&args->id, &args->der_encoded);
 	LOG_TEST_RET(ctx, r, "Get certificate 'intrinsic ID' error");
+	sc_log(ctx, "Cert(ID:%s) rv %i", sc_pkcs15_print_id(&args->id), r);
 
-	/* Select an ID if the user didn't specify one, otherwise
-	 * make sure it's unique */
+	/* Select an ID if the user didn't specify one, otherwise make sure it's unique */
 	r = select_id(p15card, SC_PKCS15_TYPE_CERT, &args->id);
+	if (r == SC_ERROR_NON_UNIQUE_ID && args->update)   {
+		struct sc_pkcs15_object *existing_obj = NULL;
+
+		r = sc_pkcs15_find_object_by_id(p15card, SC_PKCS15_TYPE_CERT, &args->id, &existing_obj);
+		if (!r)   {
+			sc_log(ctx, "Found cert(ID:%s)", sc_pkcs15_print_id(&args->id));
+			existing_path = ((struct sc_pkcs15_cert_info *)existing_obj->data)->path;
+
+			sc_pkcs15_remove_object(p15card, existing_obj);
+			sc_pkcs15_free_object(existing_obj);
+		}
+
+		r = select_id(p15card, SC_PKCS15_TYPE_CERT, &args->id);
+	}
+	sc_log(ctx, "Select ID Cert(ID:%s) rv %i", sc_pkcs15_print_id(&args->id), r);
 	LOG_TEST_RET(ctx, r, "Select certificate ID error");
 
 	object = sc_pkcs15init_new_object(SC_PKCS15_TYPE_CERT_X509, label, NULL, NULL);
@@ -1657,8 +1677,14 @@ sc_pkcs15init_store_certificate(struct sc_pkcs15_card *p15card,
 	sc_der_copy(&object->content, &args->der_encoded);
 	sc_der_copy(&cert_info->value, &args->der_encoded);
 
-	sc_log(ctx, "Store cert(%s,ID:%s,der(%p,%i))", object->label,
+	if (existing_path.len)   {
+		sc_log(ctx, "Using existing path %s", sc_print_path(&existing_path));
+		cert_info->path = existing_path;
+	}
+
+	sc_log(ctx, "Store cert(%.*s,ID:%s,der(%p,%i))", (int) sizeof object->label, object->label,
 			sc_pkcs15_print_id(&cert_info->id), args->der_encoded.value, args->der_encoded.len);
+
 	if (!profile->pkcs15.direct_certificates)
 		r = sc_pkcs15init_store_data(p15card, profile, object, &args->der_encoded, &cert_info->path);
 
@@ -1805,8 +1831,8 @@ sc_pkcs15init_get_pin_reference(struct sc_pkcs15_card *p15card,
 		struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *)auth_objs[ii]->data;
 		struct sc_pkcs15_pin_attributes *pin_attrs = &auth_info->attrs.pin;
 
-		sc_log(ctx, "check PIN(%s,auth_method:%i,type:%i,reference:%i,flags:%X)",
-				auth_objs[ii]->label, auth_info->auth_method, pin_attrs->type,
+		sc_log(ctx, "check PIN(%.*s,auth_method:%i,type:%i,reference:%i,flags:%X)",
+				(int) sizeof auth_objs[ii]->label, auth_objs[ii]->label, auth_info->auth_method, pin_attrs->type,
 				pin_attrs->reference, pin_attrs->flags);
 		/* Find out if there is AUTH pkcs15 object with given 'type' and 'reference' */
 		if (auth_info->auth_method == auth_method && pin_attrs->reference == reference)
@@ -1889,8 +1915,10 @@ sc_pkcs15init_store_data(struct sc_pkcs15_card *p15card, struct sc_profile *prof
 	}
 
 	r = sc_pkcs15init_delete_by_path(profile, p15card, &file->path);
-	if (r && r != SC_ERROR_FILE_NOT_FOUND)
+	if (r && r != SC_ERROR_FILE_NOT_FOUND) {
+		sc_file_free(file);
 		LOG_TEST_RET(ctx, r, "Cannot delete file");
+	}
 
 	r = sc_pkcs15init_update_file(profile, p15card, file, data->value, data->len);
 
@@ -2213,6 +2241,9 @@ int
 sc_pkcs15init_select_intrinsic_id(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 		int type, struct sc_pkcs15_id *id_out, void *data)
 {
+#ifndef ENABLE_OPENSSL
+	LOG_FUNC_RETURN(p15card->card->ctx, SC_SUCCESS);
+#else
 	struct sc_context *ctx = p15card->card->ctx;
 	struct sc_pkcs15_pubkey *pubkey = NULL;
 	unsigned id_style;
@@ -2222,9 +2253,7 @@ sc_pkcs15init_select_intrinsic_id(struct sc_pkcs15_card *p15card, struct sc_prof
 	int rv, allocated = 0;
 
 	LOG_FUNC_CALLED(ctx);
-#ifndef ENABLE_OPENSSL
-	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
-#else
+
 	if (!id_out || !profile)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
@@ -2293,10 +2322,12 @@ sc_pkcs15init_select_intrinsic_id(struct sc_pkcs15_card *p15card, struct sc_prof
 		break;
 	case SC_PKCS15INIT_ID_STYLE_RFC2459:
 		rv = sc_pkcs15_encode_pubkey(ctx, pubkey, &id_data, &id_data_len);
-		LOG_TEST_RET(ctx, rv, "Encoding public key error");
+		LOG_TEST_GOTO_ERR(ctx, rv, "Encoding public key error");
 
-		if (!id_data || !id_data_len)
-			LOG_TEST_RET(ctx, SC_ERROR_INTERNAL, "Encoding public key error");
+		if (!id_data || !id_data_len) {
+			rv = SC_ERROR_INTERNAL;
+			LOG_TEST_GOTO_ERR(ctx, rv, "Encoding public key error");
+		}
 
 		SHA1(id_data, id_data_len, id.value);
 		id.len = SHA_DIGEST_LENGTH;
@@ -2304,17 +2335,20 @@ sc_pkcs15init_select_intrinsic_id(struct sc_pkcs15_card *p15card, struct sc_prof
 		break;
 	default:
 		sc_log(ctx, "Unsupported ID style: %i", id_style);
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Non supported ID style");
+		rv = SC_ERROR_NOT_SUPPORTED;
+		LOG_TEST_GOTO_ERR(ctx, rv, "Non supported ID style");
 	}
 
 done:
 	memcpy(id_out, &id, sizeof(*id_out));
+	rv = id_out->len;
+err:
 	if (id_data)
 		free(id_data);
 	if (allocated)
 		sc_pkcs15_free_pubkey(pubkey);
 
-	LOG_FUNC_RETURN(ctx, id_out->len);
+	LOG_FUNC_RETURN(ctx, rv);
 #endif
 }
 
@@ -2332,8 +2366,12 @@ select_id(struct sc_pkcs15_card *p15card, int type, struct sc_pkcs15_id *id)
 	/* If the user provided an ID, make sure we can use it */
 	if (id->len != 0) {
 		r = sc_pkcs15_find_object_by_id(p15card, type, id, &obj);
+
 		if (r == SC_ERROR_OBJECT_NOT_FOUND)
 			r = 0;
+		else if (!r)
+			r = SC_ERROR_NON_UNIQUE_ID;
+
 		LOG_FUNC_RETURN(ctx, r);
 	}
 
@@ -2842,6 +2880,16 @@ sc_pkcs15init_new_object(int type, const char *label, struct sc_pkcs15_id *auth_
 }
 
 
+void
+sc_pkcs15init_free_object(struct sc_pkcs15_object *object)
+{
+	if (object) {
+		free(object->data);
+		free(object);
+	}
+}
+
+
 int
 sc_pkcs15init_change_attrib(struct sc_pkcs15_card *p15card, struct sc_profile *profile, struct sc_pkcs15_object *object,
 		int new_attrib_type, void *new_value, int new_len)
@@ -3278,11 +3326,11 @@ sc_pkcs15init_verify_secret(struct sc_profile *profile, struct sc_pkcs15_card *p
 
 	if (!r && pin_obj)   {
 		memcpy(&auth_info, pin_obj->data, sizeof(auth_info));
-		sc_log(ctx, "found PIN object '%s'", pin_obj->label);
+		sc_log(ctx, "found PIN object '%.*s'", (int) sizeof pin_obj->label, pin_obj->label);
 	}
 
 	if (pin_obj)   {
-		sc_log(ctx, "PIN object '%s'; pin_obj->content.len:%i", pin_obj->label, pin_obj->content.len);
+		sc_log(ctx, "PIN object '%.*s'; pin_obj->content.len:%i", (int) sizeof pin_obj->label, pin_obj->label, pin_obj->content.len);
 		if (pin_obj->content.value && pin_obj->content.len)   {
 			if (pin_obj->content.len > pinsize)
 				LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "PIN buffer is too small");
@@ -3378,6 +3426,7 @@ sc_pkcs15init_authenticate(struct sc_profile *profile, struct sc_pkcs15_card *p1
 	int  r = 0;
 
 	LOG_FUNC_CALLED(ctx);
+	assert(file != NULL);
 	sc_log(ctx, "path '%s', op=%u", sc_print_path(&file->path), op);
 
 	if (p15card->card->caps & SC_CARD_CAP_USE_FCI_AC) {

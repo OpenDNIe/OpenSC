@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -115,6 +117,7 @@ int sc_pkcs15_is_emulation_only(sc_card_t *card)
 		case SC_CARD_TYPE_GEMSAFEV1_PTEID:
 		case SC_CARD_TYPE_OPENPGP_V1:
 		case SC_CARD_TYPE_OPENPGP_V2:
+		case SC_CARD_TYPE_OPENPGP_GNUK:
 		case SC_CARD_TYPE_SC_HSM:
 		case SC_CARD_TYPE_DNIE_BASE:
 		case SC_CARD_TYPE_DNIE_BLANK:
@@ -270,6 +273,7 @@ static int parse_emu_block(sc_pkcs15_card_t *p15card, scconf_block *conf)
 			if (3 != sscanf(get_version(), "%u.%u.%u", &major, &minor, &fix)) {
 				sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
 					   	"unable to get modules version number\n");
+				sc_dlclose(handle);
 				return SC_ERROR_INTERNAL;
 			}
 		}

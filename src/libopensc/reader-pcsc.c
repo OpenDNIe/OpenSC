@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #ifdef ENABLE_PCSC	/* empty file without pcsc */
 #include <assert.h>
@@ -38,6 +40,12 @@
 #include "internal-winscard.h"
 
 #include "pace.h"
+
+#ifdef HAVE_PCSCLITE_H
+#if !defined (__MAC_OS_X_VERSION_MIN_REQUIRED) || __MAC_OS_X_VERSION_MIN_REQUIRED < 101000
+#define HAVE_PCSCLITE 1
+#endif
+#endif
 
 /* Logging */
 #define PCSC_TRACE(reader, desc, rv) do { sc_log(reader->ctx, "%s:" desc ": 0x%08lx\n", reader->name, rv); } while (0)
@@ -182,6 +190,9 @@ static int pcsc_internal_transmit(sc_reader_t *reader,
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_NORMAL);
 	card = priv->pcsc_card;
 
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
+
 	sSendPci.dwProtocol = opensc_proto_to_pcsc(reader->active_protocol);
 	sSendPci.cbPciLength = sizeof(sSendPci);
 	sRecvPci.dwProtocol = opensc_proto_to_pcsc(reader->active_protocol);
@@ -281,6 +292,9 @@ static int refresh_attributes(sc_reader_t *reader)
 	LONG rv;
 
 	sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "%s check", reader->name);
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	if (priv->reader_state.szReader == NULL) {
 		priv->reader_state.szReader = reader->name;
@@ -423,8 +437,10 @@ static int pcsc_reconnect(sc_reader_t * reader, DWORD action)
 	if (check_forced_protocol(reader->ctx, &reader->atr, &tmp))
 		protocol = tmp;
 
-	/* reconnect always unlocks transaction */
+#ifndef HAVE_PCSCLITE
+	/* reconnect unlocks transaction everywhere but in PCSC-lite */
 	priv->locked = 0;
+#endif
 
 	rv = priv->gpriv->SCardReconnect(priv->pcsc_card,
 			    priv->gpriv->connect_exclusive ? SCARD_SHARE_EXCLUSIVE : SCARD_SHARE_SHARED,
@@ -503,7 +519,8 @@ static int pcsc_disconnect(sc_reader_t * reader)
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_NORMAL);
 
-	priv->gpriv->SCardDisconnect(priv->pcsc_card, priv->gpriv->disconnect_action);
+	if (!(reader->ctx->flags & SC_CTX_FLAG_TERMINATE))
+		priv->gpriv->SCardDisconnect(priv->pcsc_card, priv->gpriv->disconnect_action);
 	reader->flags = 0;
 	return SC_SUCCESS;
 }
@@ -515,6 +532,9 @@ static int pcsc_lock(sc_reader_t *reader)
 	struct pcsc_private_data *priv = GET_PRIV_DATA(reader);
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_NORMAL);
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	rv = priv->gpriv->SCardBeginTransaction(priv->pcsc_card);
 
@@ -553,6 +573,9 @@ static int pcsc_unlock(sc_reader_t *reader)
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_NORMAL);
 
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
+
 	rv = priv->gpriv->SCardEndTransaction(priv->pcsc_card, priv->gpriv->transaction_end_action);
 
 	priv->locked = 0;
@@ -573,17 +596,21 @@ static int pcsc_release(sc_reader_t *reader)
 
 static int pcsc_reset(sc_reader_t *reader, int do_cold_reset)
 {
-	struct pcsc_private_data *priv = GET_PRIV_DATA(reader);
 	int r;
+#ifndef HAVE_PCSCLITE
+	struct pcsc_private_data *priv = GET_PRIV_DATA(reader);
 	int old_locked = priv->locked;
+#endif
 
 	r = pcsc_reconnect(reader, do_cold_reset ? SCARD_UNPOWER_CARD : SCARD_RESET_CARD);
 	if(r != SC_SUCCESS)
 		return r;
 
-	/* pcsc_reconnect unlocks card... try to lock it again if it was locked */
+#ifndef HAVE_PCSCLITE
+	/* reconnect unlocks transaction everywhere but in PCSC-lite */
 	if(old_locked)
 		r = pcsc_lock(reader);
+#endif
 
 	return r;
 }
@@ -595,12 +622,18 @@ static int pcsc_cancel(sc_context_t *ctx)
 	struct pcsc_global_private_data *gpriv = (struct pcsc_global_private_data *)ctx->reader_drv_data;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
+
+	if (ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
+
 #ifndef _WIN32
 	if (gpriv->pcsc_wait_ctx != -1) {
 		rv = gpriv->SCardCancel(gpriv->pcsc_wait_ctx);
-		if (rv == SCARD_S_SUCCESS)
+		if (rv == SCARD_S_SUCCESS) {
 			 /* Also close and clear the waiting context */
 			 rv = gpriv->SCardReleaseContext(gpriv->pcsc_wait_ctx);
+			 gpriv->pcsc_wait_ctx = -1;
+		}
 	}
 #else
 	rv = gpriv->SCardCancel(gpriv->pcsc_ctx);
@@ -618,7 +651,7 @@ static struct sc_reader_driver pcsc_drv = {
 	"PC/SC reader",
 	"pcsc",
 	&pcsc_ops,
-	0, 0, NULL
+	NULL
 };
 
 static int pcsc_init(sc_context_t *ctx)
@@ -745,7 +778,7 @@ static int pcsc_finish(sc_context_t *ctx)
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 
 	if (gpriv) {
-		if (gpriv->pcsc_ctx != -1)
+		if (gpriv->pcsc_ctx != -1 && !(ctx->flags & SC_CTX_FLAG_TERMINATE))
 			gpriv->SCardReleaseContext(gpriv->pcsc_ctx);
 		if (gpriv->dlhandle != NULL)
 			sc_dlclose(gpriv->dlhandle);
@@ -815,6 +848,90 @@ err:
     return flags;
 }
 
+static int
+part10_find_property_by_tag(unsigned char buffer[], int length,
+	int tag_searched);
+/**
+ * @brief Detects reader's maximum data size
+ *
+ * @param reader reader to probe (\c get_tlv_properties must be initialized)
+ *
+ * @return maximum data size
+ */
+static size_t part10_detect_max_data(sc_reader_t *reader, SCARDHANDLE card_handle)
+{
+    u8 rbuf[256];
+    DWORD rcount = sizeof rbuf;
+    struct pcsc_private_data *priv;
+	/* 0 means no limitations */
+    size_t max_data = 0;
+	int r;
+
+    if (!reader)
+        goto err;
+    priv = GET_PRIV_DATA(reader);
+    if (!priv)
+        goto err;
+
+    if (priv->get_tlv_properties && priv->gpriv) {
+		if (SCARD_S_SUCCESS != priv->gpriv->SCardControl(card_handle,
+					priv->get_tlv_properties, NULL, 0, rbuf, sizeof(rbuf),
+					&rcount)) {
+			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL,
+				   	"PC/SC v2 part 10: Get TLV properties failed!");
+			goto err;
+		}
+
+		r = part10_find_property_by_tag(rbuf, rcount,
+				PCSCv2_PART10_PROPERTY_dwMaxAPDUDataSize);
+		if (r >= 0)
+			max_data = r;
+    }
+
+err:
+    return max_data;
+}
+
+static int part10_get_vendor_product(struct sc_reader *reader,
+		SCARDHANDLE card_handle, int *id_vendor, int *id_product)
+{
+    u8 rbuf[256];
+    DWORD rcount = sizeof rbuf;
+    struct pcsc_private_data *priv;
+	/* 0 means no limitations */
+    int this_vendor = -1, this_product = -1;
+
+    if (!reader)
+        return SC_ERROR_INVALID_ARGUMENTS;
+    priv = GET_PRIV_DATA(reader);
+    if (!priv)
+        return SC_ERROR_INVALID_ARGUMENTS;
+
+	if (priv->get_tlv_properties && priv->gpriv) {
+		if (SCARD_S_SUCCESS != priv->gpriv->SCardControl(card_handle,
+					priv->get_tlv_properties, NULL, 0, rbuf, sizeof(rbuf),
+					&rcount)) {
+			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL,
+					"PC/SC v2 part 10: Get TLV properties failed!");
+			return SC_ERROR_TRANSMIT_FAILED;
+		}
+
+		this_vendor = part10_find_property_by_tag(rbuf, rcount,
+				PCSCv2_PART10_PROPERTY_wIdVendor);
+		this_product = part10_find_property_by_tag(rbuf, rcount,
+				PCSCv2_PART10_PROPERTY_wIdProduct);
+	}
+
+	sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "id_vendor=%04x id_product=%04x", this_vendor, this_product);
+
+	if (id_vendor)
+		*id_vendor = this_vendor;
+	if (id_product)
+		*id_product = this_product;
+
+	return SC_SUCCESS;
+}
+
 static void detect_reader_features(sc_reader_t *reader, SCARDHANDLE card_handle) {
 	sc_context_t *ctx = reader->ctx;
 	struct pcsc_global_private_data *gpriv = (struct pcsc_global_private_data *) ctx->reader_drv_data;
@@ -824,7 +941,6 @@ static void detect_reader_features(sc_reader_t *reader, SCARDHANDLE card_handle)
 	PCSC_TLV_STRUCTURE *pcsc_tlv;
 	LONG rv;
 	const char *log_disabled = "but it's disabled in configuration file";
-	const char *broken_readers[] = {"HP USB Smart Card Keyboard"};
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 
@@ -892,14 +1008,6 @@ static void detect_reader_features(sc_reader_t *reader, SCARDHANDLE card_handle)
 		}
 	}
 
-	/* Ignore advertised pinpad capability on readers known to be broken. Trac #340 */
-	for (i = 0; i < sizeof(broken_readers)/sizeof(broken_readers[0]); i++) {
-		if (strstr(reader->name, broken_readers[i]) && (reader->capabilities & SC_READER_CAP_PIN_PAD)) {
-			sc_log(ctx, "%s has a broken pinpad, ignoring", reader->name);
-			reader->capabilities &= ~SC_READER_CAP_PIN_PAD;
-		}
-	}
-
 	/* Detect display */
 	if (priv->pin_properties_ioctl) {
 		rcount = sizeof(rbuf);
@@ -938,6 +1046,17 @@ static void detect_reader_features(sc_reader_t *reader, SCARDHANDLE card_handle)
 			sc_log(ctx, "%s %s", log_text, log_disabled);
 		}
 	}
+
+	if (priv->get_tlv_properties) {
+		/* Set reader max_send_size and max_recv_size based on
+		 * detected max_data */
+		reader->max_send_size = part10_detect_max_data(reader,
+				card_handle);
+		reader->max_recv_size = reader->max_send_size;
+
+		/* debug the product and vendor ID of the reader */
+		part10_get_vendor_product(reader, card_handle, NULL, NULL);
+	}
 }
 
 static int pcsc_detect_readers(sc_context_t *ctx)
@@ -949,6 +1068,7 @@ static int pcsc_detect_readers(sc_context_t *ctx)
 	char *reader_buf = NULL, *reader_name;
 	const char *mszGroups = NULL;
 	int ret = SC_ERROR_INTERNAL;
+	size_t i;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 
@@ -958,7 +1078,13 @@ static int pcsc_detect_readers(sc_context_t *ctx)
 		goto out;
 	}
 
-	sc_log(ctx, "Probing pcsc readers");
+	/* temporarily mark all readers as removed */
+	for (i=0;i < sc_ctx_get_reader_count(ctx);i++) {
+		sc_reader_t *reader = sc_ctx_get_reader(ctx, i);
+		reader->flags |= SC_READER_REMOVED;
+	}
+
+	sc_log(ctx, "Probing PC/SC readers");
 
 	do {
 		if (gpriv->pcsc_ctx == -1) {
@@ -972,6 +1098,13 @@ static int pcsc_detect_readers(sc_context_t *ctx)
 		else {
 			rv = gpriv->SCardListReaders(gpriv->pcsc_ctx, NULL, NULL,
 					      (LPDWORD) &reader_buf_size);
+			if (rv == SCARD_E_NO_SERVICE) {
+				gpriv->SCardReleaseContext(gpriv->pcsc_ctx);
+				gpriv->pcsc_ctx = -1;
+				gpriv->pcsc_wait_ctx = -1;
+				/* reconnecting below may may restart PC/SC service */
+				rv = SCARD_E_INVALID_HANDLE;
+			}
 		}
 		if (rv != SCARD_S_SUCCESS) {
 			if (rv != (LONG)SCARD_E_INVALID_HANDLE) {
@@ -980,7 +1113,7 @@ static int pcsc_detect_readers(sc_context_t *ctx)
 				goto out;
 			}
 
-			sc_log(ctx, "Establish pcsc context");
+			sc_log(ctx, "Establish PC/SC context");
 
 			rv = gpriv->SCardEstablishContext(SCARD_SCOPE_USER,
 					      NULL, NULL, &gpriv->pcsc_ctx);
@@ -1007,28 +1140,28 @@ static int pcsc_detect_readers(sc_context_t *ctx)
 		goto out;
 	}
 	for (reader_name = reader_buf; *reader_name != '\x0'; reader_name += strlen(reader_name) + 1) {
-		sc_reader_t *reader = NULL;
+		sc_reader_t *reader = NULL, *old_reader;
 		struct pcsc_private_data *priv = NULL;
-		unsigned int i;
 		int found = 0;
 
 		for (i=0;i < sc_ctx_get_reader_count(ctx) && !found;i++) {
-			sc_reader_t *reader2 = sc_ctx_get_reader(ctx, i);
-			if (reader2 == NULL) {
+			old_reader = sc_ctx_get_reader(ctx, i);
+			if (old_reader == NULL) {
 				ret = SC_ERROR_INTERNAL;
 				goto err1;
 			}
-			if (!strcmp(reader2->name, reader_name)) {
+			if (!strcmp(old_reader->name, reader_name)) {
 				found = 1;
 			}
 		}
 
 		/* Reader already available, skip */
 		if (found) {
+			old_reader->flags &= ~SC_READER_REMOVED;
 			continue;
 		}
 
-		sc_log(ctx, "Found new pcsc reader '%s'", reader_name);
+		sc_log(ctx, "Found new PC/SC reader '%s'", reader_name);
 
 		if ((reader = calloc(1, sizeof(sc_reader_t))) == NULL) {
 			ret = SC_ERROR_OUT_OF_MEMORY;
@@ -1495,8 +1628,8 @@ static int part10_build_modify_pin_block(struct sc_reader *reader, u8 * buf, siz
 
 	/* Ignore language and T=1 parameters. */
 	pin_modify->wLangId = HOST_TO_CCID_16(0x0000);
-	pin_modify->bMsgIndex1 = 0x00; /* Default message indexes */
-	pin_modify->bMsgIndex2 = 0x01;
+	pin_modify->bMsgIndex1 = (data->flags & SC_PIN_CMD_IMPLICIT_CHANGE ? 0x01: 0x00); /* Default message indexes */
+	pin_modify->bMsgIndex2 = (data->flags & SC_PIN_CMD_IMPLICIT_CHANGE ? 0x02: 0x01);
 	pin_modify->bMsgIndex3 = 0x02;
 	pin_modify->bTeoPrologue[0] = 0x00;
 	pin_modify->bTeoPrologue[1] = 0x00;
@@ -1580,6 +1713,9 @@ part10_check_pin_min_max(sc_reader_t *reader, struct sc_pin_cmd_data *data)
 	   	data->flags & SC_PIN_CMD_IMPLICIT_CHANGE ?
 	   	&data->pin1 : &data->pin2;
 
+    if (!priv->get_tlv_properties)
+		return 0;
+
 	r = pcsc_internal_transmit(reader, NULL, 0, buffer, &length,
 		priv->get_tlv_properties);
 	SC_TEST_RET(reader->ctx, SC_LOG_DEBUG_NORMAL, r,
@@ -1626,6 +1762,9 @@ pcsc_pin_cmd(sc_reader_t *reader, struct sc_pin_cmd_data *data)
 	sc_apdu_t *apdu;
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_NORMAL);
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	if (priv->gpriv->SCardControl == NULL)
 		return SC_ERROR_NOT_SUPPORTED;
@@ -1916,8 +2055,8 @@ static int transform_pace_output(u8 *rbuf, size_t rbuflen,
 static int
 pcsc_perform_pace(struct sc_reader *reader, void *input_pace, void *output_pace)
 {
-        struct establish_pace_channel_input *pace_input = (struct establish_pace_channel_input *) input_pace;
-        struct establish_pace_channel_output *pace_output = (struct establish_pace_channel_output *) output_pace;
+	struct establish_pace_channel_input *pace_input = (struct establish_pace_channel_input *) input_pace;
+	struct establish_pace_channel_output *pace_output = (struct establish_pace_channel_output *) output_pace;
 	struct pcsc_private_data *priv;
 	u8 rbuf[SC_MAX_EXT_APDU_BUFFER_SIZE], sbuf[SC_MAX_EXT_APDU_BUFFER_SIZE];
 	size_t rcount = sizeof rbuf, scount = sizeof sbuf;
@@ -1976,10 +2115,6 @@ struct sc_reader_driver * sc_get_pcsc_driver(void)
 
 static int cardmod_connect(sc_reader_t *reader)
 {
-	DWORD active_proto, protocol;
-	SCARDHANDLE card_handle;
-	LONG rv;
-	struct pcsc_private_data *priv = GET_PRIV_DATA(reader);
 	int r;
 
 	r = refresh_attributes(reader);
@@ -2005,7 +2140,7 @@ static struct sc_reader_driver cardmod_drv = {
 	"PC/SC cardmod reader",
 	"cardmod",
 	&cardmod_ops,
-	0, 0, NULL
+	NULL
 };
 
 static int cardmod_init(sc_context_t *ctx)
@@ -2103,10 +2238,7 @@ int cardmod_use_reader(sc_context_t *ctx, void * pcsc_context_handle, void * pcs
 	char reader_name[128];
 	DWORD rcount, feature_len, display_ioctl, reader_name_size = sizeof(reader_name);
 	int ret = SC_ERROR_INTERNAL;
-	HKEY key;
 	unsigned int i;
-	wchar_t b;
-	char *p;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 
@@ -2362,4 +2494,3 @@ struct sc_reader_driver * sc_get_cardmod_driver(void)
 #endif
 
 #endif   /* ENABLE_PCSC */
-

@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 #ifdef ENABLE_SM		/* empty file without SM enabled */
 #ifdef ENABLE_OPENSSL		/* empty file without openssl */
 
@@ -854,24 +856,38 @@ epass2003_sm_get_wrapped_apdu(struct sc_card *card,
 	*sm_apdu = NULL;
 	//construct new SM apdu from original apdu
 	apdu = calloc(1, sizeof(struct sc_apdu));
-	if (!apdu)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if (!apdu) {
+		rv = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
 	apdu->data = calloc (1, SC_MAX_EXT_APDU_BUFFER_SIZE);
-	if (!apdu->data)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if (!apdu->data) {
+		rv = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
 	apdu->resp = calloc (1, SC_MAX_EXT_APDU_BUFFER_SIZE);
-	if (!apdu->resp)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if (!apdu->resp) {
+		rv = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
 	apdu->datalen = SC_MAX_EXT_APDU_BUFFER_SIZE;
 	apdu->resplen = SC_MAX_EXT_APDU_BUFFER_SIZE;
 
 	rv = epass2003_sm_wrap_apdu(card, plain, apdu);
 	if (rv)   {
 		rv = epass2003_sm_free_wrapped_apdu(card, NULL, &apdu);
-		LOG_FUNC_RETURN(ctx, rv);
+		if (rv < 0)
+			goto err;
 	}
 
 	*sm_apdu = apdu;
+	apdu = NULL;
+err:
+	if (apdu) {
+		free((unsigned char *) apdu->data);
+		free(apdu->resp);
+		free(apdu);
+	}
 	LOG_FUNC_RETURN(ctx, rv);
 }
 
@@ -2164,10 +2180,9 @@ get_external_key_maxtries(struct sc_card *card, unsigned char *maxtries)
 		SC_PATH_TYPE_PATH,
 		{{0}, 0}
 	};
-	struct sc_file *ef_file;
 	int ret;
 
-	ret = sc_select_file(card, &file_path, &ef_file);
+	ret = sc_select_file(card, &file_path, NULL);
 	LOG_TEST_RET(card->ctx, ret, "select max counter file failed");
 
 	ret = sc_read_binary(card, 0, maxcounter, 2, 0);

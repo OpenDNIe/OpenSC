@@ -70,7 +70,10 @@ myeid_get_init_applet_data(struct sc_profile *profile, struct sc_pkcs15_card *p1
 	sc_file_dup(&tmp_file, profile->mf_info->file);
 	if (tmp_file == NULL)
 		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot duplicate MF file");
+
 	r = sc_pkcs15init_fixup_file(profile, p15card, tmp_file);
+	if (r < 0)
+		sc_file_free(tmp_file);
 	LOG_TEST_RET(ctx, r, "MF fixup failed");
 
 	/* AC 'Create DF' and 'Create EF' */
@@ -100,6 +103,8 @@ myeid_get_init_applet_data(struct sc_profile *profile, struct sc_pkcs15_card *p1
 	if (tmp_file == NULL)
 		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot duplicate Application DF file");
 	r = sc_pkcs15init_fixup_file(profile, p15card, tmp_file);
+	if (r < 0)
+		sc_file_free(tmp_file);
 	LOG_TEST_RET(ctx, r, "Application DF fixup failed");
 
 	/* AC 'Create DF' and 'Create EF' */
@@ -118,8 +123,8 @@ myeid_get_init_applet_data(struct sc_profile *profile, struct sc_pkcs15_card *p1
 	else if (entry->method == SC_AC_NEVER)
 		*(data + 6) = 0xFF; /* 'NEVER'. */
 	*(data + 7) = 0xFF;
-	sc_file_free(tmp_file);
 
+	sc_file_free(tmp_file);
 	LOG_FUNC_RETURN(p15card->card->ctx, SC_SUCCESS);
 }
 
@@ -223,7 +228,10 @@ myeid_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *df
 		for (ii = 0; create_dfs[ii]; ii++) {
 			sc_log(ctx, "Create '%s'", create_dfs[ii]);
 
-			if (sc_profile_get_file(profile, create_dfs[ii], &file)) {
+			r = sc_profile_get_file(profile, create_dfs[ii], &file);
+			if (file)
+				sc_file_free(file);
+			if (r) {
 				sc_log(ctx, "Inconsistent profile: cannot find %s", create_dfs[ii]);
 				LOG_FUNC_RETURN(ctx, SC_ERROR_INCONSISTENT_PROFILE);
 			}
@@ -646,7 +654,7 @@ myeid_generate_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 			memcpy(pubkey->u.rsa.modulus.data, raw_pubkey, pubkey->u.rsa.modulus.len);
 		}
 		else if (object->type == SC_PKCS15_TYPE_PRKEY_EC) {
-			struct sc_ec_parameters *ecparams = (struct sc_pkcs15_ec_parameters *)key_info->params.data;
+			struct sc_ec_parameters *ecparams = (struct sc_ec_parameters *)key_info->params.data;
 
 			sc_log(ctx, "curve '%s', len %i, oid '%s'", ecparams->named_curve, ecparams->field_length, sc_dump_oid(&(ecparams->id)));
 			pubkey->algorithm = SC_ALGORITHM_EC;

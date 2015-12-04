@@ -41,7 +41,20 @@
 #include "compression.h"
 #include "cwa14890.h"
 #include "cwa-dnie.h"
-#include "user-interface.h"
+
+#ifdef _WIN32
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+
+#include <windows.h>
+#endif
+#ifdef __APPLE__
+#include <Carbon/Carbon.h>
+#endif
+/* default titles */
+#define USER_CONSENT_TITLE "Confirm"
 
 extern cwa_provider_t *dnie_get_cwa_provider(sc_card_t * card);
 extern int dnie_read_file(
@@ -141,6 +154,197 @@ const char *user_consent_message="Está a punto de realizar una firma electróni
 #else
 const char *user_consent_message="Esta a punto de realizar una firma digital\ncon su clave de FIRMA del DNI electronico.\nDesea permitir esta operacion?";
 #endif
+
+#ifdef ENABLE_DNIE_UI
+/**
+ * Messages used on pinentry protocol
+ */
+char *user_consent_msgs[] = { "SETTITLE", "SETDESC", "CONFIRM", "BYE" };
+
+/**
+ * Ask for user consent.
+ *
+ * Check for user consent configuration,
+ * Invoke proper gui app and check result
+ *
+ * @param card pointer to sc_card structure
+ * @param title Text to appear in the window header
+ * @param text Message to show to the user
+ * @return SC_SUCCESS on user consent OK , else error code
+ */
+int dnie_ask_user_consent(struct sc_card * card, const char *title, const char *message)
+{
+#ifdef __APPLE__
+	CFOptionFlags result;  /* result code from the message box */
+	/* convert the strings from char* to CFStringRef */
+	CFStringRef header_ref; /* to store title */
+	CFStringRef message_ref; /* to store message */
+#endif
+#ifdef linux
+	pid_t pid;
+	FILE *fin=NULL;
+	FILE *fout=NULL;	/* to handle pipes as streams */
+	struct stat st_file;	/* to verify that executable exists */
+	int srv_send[2];	/* to send data from server to client */
+	int srv_recv[2];	/* to receive data from client to server */
+	char outbuf[1024];	/* to compose and send messages */
+	char buf[1024];		/* to store client responses */
+	int n = 0;		/* to iterate on to-be-sent messages */
+#endif
+	int res = SC_ERROR_INTERNAL;	/* by default error :-( */
+	char *msg = NULL;	/* to makr errors */
+
+	if ((card == NULL) || (card->ctx == NULL))
+		return SC_ERROR_INVALID_ARGUMENTS;
+	LOG_FUNC_CALLED(card->ctx);
+
+	if ((title==NULL) || (message==NULL))
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
+
+	if (GET_DNIE_UI_CTX(card).user_consent_enabled == 0) {
+		sc_log(card->ctx,
+		       "User Consent is disabled in configuration file");
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+	}
+#ifdef _WIN32
+	/* in Windows, do not use pinentry, but MessageBox system call */
+	res = MessageBox (
+		NULL,
+		TEXT(message),
+		TEXT(title),
+		MB_ICONWARNING | MB_OKCANCEL | MB_DEFBUTTON2 | MB_APPLMODAL
+		);
+	if ( res == IDOK )
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+	LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ALLOWED);
+#elif __APPLE__
+	/* Also in Mac OSX use native functions */
+
+	/* convert the strings from char* to CFStringRef */
+	header_ref = CFStringCreateWithCString( NULL, title, strlen(title) );
+	message_ref = CFStringCreateWithCString( NULL,message, strlen(message) );
+
+	/* Displlay user notification alert */
+	CFUserNotificationDisplayAlert(
+		0, /* no timeout */
+		kCFUserNotificationNoteAlertLevel,  /* Alert level */
+		NULL,	/* IconURL, use default, you can change */
+			/* it depending message_type flags */
+		NULL,	/* SoundURL (not used) */
+		NULL,	/* localization of strings */
+		header_ref,	/* header. Cannot be null */
+		message_ref,	/* message text */
+		CFSTR("Cancel"), /* default ( "OK" if null) button text */
+		CFSTR("OK"), /* second button title */
+                NULL, /* third button title, null--> no other button */
+		&result /* response flags */
+	);
+
+	/* Clean up the strings */
+	CFRelease( header_ref );
+        CFRelease( message_ref );
+	/* Return 0 only if "OK" is selected */
+	if( result == kCFUserNotificationAlternateResponse )
+		LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+	LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ALLOWED);
+#elif linux
+	/* check that user_consent_app exists. TODO: check if executable */
+	res = stat(GET_DNIE_UI_CTX(card).user_consent_app, &st_file);
+	if (res != 0) {
+		sc_log(card->ctx, "Invalid pinentry application: %s\n",
+		       GET_DNIE_UI_CTX(card).user_consent_app);
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
+	}
+
+	/* just a simple bidirectional pipe+fork+exec implementation */
+	/* In a pipe, xx[0] is for reading, xx[1] is for writing */
+	if (pipe(srv_send) < 0) {
+		msg = "pipe(srv_send)";
+		goto do_error;
+	}
+	if (pipe(srv_recv) < 0) {
+		msg = "pipe(srv_recv)";
+		goto do_error;
+	}
+	pid = fork();
+	switch (pid) {
+	case -1:		/* error  */
+		msg = "fork()";
+		goto do_error;
+	case 0:		/* child  */
+		/* make our pipes, our new stdin & stderr, closing older ones */
+		dup2(srv_send[0], STDIN_FILENO);	/* map srv send for input */
+		dup2(srv_recv[1], STDOUT_FILENO);	/* map srv_recv for output */
+		/* once dup2'd pipes are no longer needed on client; so close */
+		close(srv_send[0]);
+		close(srv_send[1]);
+		close(srv_recv[0]);
+		close(srv_recv[1]);
+		/* call exec() with proper user_consent_app from configuration */
+		/* if ok should never return */
+		execlp(GET_DNIE_UI_CTX(card).user_consent_app, GET_DNIE_UI_CTX(card).user_consent_app, (char *)NULL);
+		res = SC_ERROR_INTERNAL;
+		msg = "execlp() error";	/* exec() failed */
+		goto do_error;
+	default:		/* parent */
+		/* Close the pipe ends that the child uses to read from / write to
+		 * so when we close the others, an EOF will be transmitted properly.
+		 */
+		close(srv_send[0]);
+		close(srv_recv[1]);
+		/* use iostreams to take care on newlines and text based data */
+		fin = fdopen(srv_recv[0], "r");
+		if (fin == NULL) {
+			msg = "fdopen(in)";
+			goto do_error;
+		}
+		fout = fdopen(srv_send[1], "w");
+		if (fout == NULL) {
+			msg = "fdopen(out)";
+			goto do_error;
+		}
+		/* read and ignore first line */
+		fflush(stdin);
+		for (n = 0; n<4; n++) {
+			char *pt;
+			memset(outbuf, 0, sizeof(outbuf));
+			if (n==0) snprintf(outbuf,1023,"%s %s\n",user_consent_msgs[0],title);
+			else if (n==1) snprintf(outbuf,1023,"%s %s\n",user_consent_msgs[1],message);
+			else snprintf(outbuf,1023,"%s\n",user_consent_msgs[n]);
+			/* send message */
+			fputs(outbuf, fout);
+			fflush(fout);
+			/* get response */
+			memset(buf, 0, sizeof(buf));
+			pt=fgets(buf, sizeof(buf) - 1, fin);
+			if (pt==NULL) {
+				res = SC_ERROR_INTERNAL;
+				msg = "fgets() Unexpected IOError/EOF";
+				goto do_error;
+			}
+			if (strstr(buf, "OK") == NULL) {
+				res = SC_ERROR_NOT_ALLOWED;
+				msg = "fail/cancel";
+				goto do_error;
+			}
+		}
+	}			/* switch */
+	/* arriving here means signature has been accepted by user */
+	res = SC_SUCCESS;
+	msg = NULL;
+do_error:
+	/* close out channel to force client receive EOF and also die */
+	if (fout != NULL) fclose(fout);
+	if (fin != NULL) fclose(fin);
+#else
+#error "Don't know how to handle user consent in this (rare) Operating System"
+#endif
+	if (msg != NULL)
+		sc_log(card->ctx, "%s", msg);
+	LOG_FUNC_RETURN(card->ctx, res);
+}
+
+#endif				/* ENABLE_DNIE_UI */
 
 /**
  * DNIe specific card driver operations
@@ -293,7 +497,7 @@ data_found:
 static int dnie_get_info(sc_card_t * card, char *data[])
 {
 	sc_file_t *file = NULL;
-        sc_path_t *path = NULL;
+        sc_path_t path;
         u8 *buffer = NULL;
 	size_t bufferlen = 0;
 	char *msg = NULL;
@@ -309,14 +513,8 @@ static int dnie_get_info(sc_card_t * card, char *data[])
 	/* phase 1: get DNIe number, Name and GivenName */
 
 	/* read EF(CDF) at 3F0050156004 */
-	path = (sc_path_t *) calloc(1, sizeof(sc_path_t));
-	if (!path) {
-		msg = "Cannot allocate path data for EF(CDF) read";
-		res = SC_ERROR_OUT_OF_MEMORY;
-		goto get_info_end;
-	}
-	sc_format_path("3F0050156004", path);
-	res = dnie_read_file(card, path, &file, &buffer, &bufferlen);
+	sc_format_path("3F0050156004", &path);
+	res = dnie_read_file(card, &path, &file, &buffer, &bufferlen);
 	if (res != SC_SUCCESS) {
 		msg = "Cannot read EF(CDF)";
 		goto get_info_end;
@@ -334,7 +532,7 @@ static int dnie_get_info(sc_card_t * card, char *data[])
         }
 
 	/* phase 2: get IDESP */
-	sc_format_path("3F000006", path);
+	sc_format_path("3F000006", &path);
 	if (file) {
 		sc_file_free(file);
 		file = NULL;
@@ -344,7 +542,7 @@ static int dnie_get_info(sc_card_t * card, char *data[])
 		buffer=NULL; 
 		bufferlen=0;
 	}
-	res = dnie_read_file(card, path, &file, &buffer, &bufferlen);
+	res = dnie_read_file(card, &path, &file, &buffer, &bufferlen);
 	if (res != SC_SUCCESS) {
 		data[3]=NULL;
 		goto get_info_ph3;
@@ -359,7 +557,7 @@ static int dnie_get_info(sc_card_t * card, char *data[])
 
 get_info_ph3:
 	/* phase 3: get DNIe software version */
-	sc_format_path("3F002F03", path);
+	sc_format_path("3F002F03", &path);
 	if (file) {
 		sc_file_free(file);
 		file = NULL;
@@ -373,7 +571,7 @@ get_info_ph3:
 	* Some old DNIe cards seems not to include SW version file,
  	* so let this code fail without notice
  	*/
-	res = dnie_read_file(card, path, &file, &buffer, &bufferlen);
+	res = dnie_read_file(card, &path, &file, &buffer, &bufferlen);
 	if (res != SC_SUCCESS) {
 		msg = "Cannot read DNIe Version EF";
 		data[4]=NULL;
@@ -395,10 +593,12 @@ get_info_ph3:
 get_info_end:
 	if (file) {
 		sc_file_free(file);
-		free(buffer);
 		file = NULL;
-		buffer = NULL;
-		bufferlen = 0;
+	}
+	if (buffer) {
+		free(buffer);
+		buffer=NULL;
+		bufferlen=0;
 	}
 	if (msg)
 		sc_log(card->ctx,msg);
@@ -497,8 +697,8 @@ static inline void init_flags(struct sc_card *card)
 	card->max_send_size = (255 - 12);	/* manual says 255, but we need 12 extra bytes when encoding */
 	card->max_recv_size = 255;
 
-	algoflags = SC_ALGORITHM_RSA_RAW;	/* RSA support */
-	algoflags |= SC_ALGORITHM_RSA_HASH_NONE;
+	/* RSA Support with PKCS1.5 padding */
+	algoflags = SC_ALGORITHM_RSA_HASH_NONE | SC_ALGORITHM_RSA_PAD_PKCS1;
 	_sc_card_add_rsa_alg(card, 1024, algoflags, 0);
 	_sc_card_add_rsa_alg(card, 2048, algoflags, 0);
 }
@@ -641,12 +841,12 @@ static unsigned long le2ulong(u8 * pt)
  */
 static u8 *dnie_uncompress(sc_card_t * card, u8 * from, size_t *len)
 {
-	int res = SC_SUCCESS;
 	u8 *upt = from;
+#ifdef ENABLE_ZLIB
+	int res = SC_SUCCESS;
 	size_t uncompressed = 0L;
 	size_t compressed = 0L;
 
-#ifdef ENABLE_ZLIB
 	if (!card || !card->ctx || !from || !len)
 		return NULL;
 	LOG_FUNC_CALLED(card->ctx);
@@ -875,7 +1075,7 @@ static int dnie_compose_and_send_apdu(sc_card_t *card, const u8 *path, size_t pa
 	apdu.lc = pathlen;
 	apdu.data = path;
 	apdu.datalen = pathlen;
-	apdu.le = card->max_recv_size > 0 ? card->max_recv_size : 256;
+	apdu.le = sc_get_max_recv_size(card);
 	if (p1 == 3)
 		apdu.cse= SC_APDU_CASE_1;
 
@@ -905,6 +1105,8 @@ static int dnie_compose_and_send_apdu(sc_card_t *card, const u8 *path, size_t pa
 	if (file == NULL)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 	res = card->ops->process_fci(card, file, apdu.resp + 2, apdu.resp[1]);
+	if (*file_out != NULL)
+		sc_file_free(*file_out);
 	*file_out = file;
 	LOG_FUNC_RETURN(ctx, res);
 }
@@ -1356,8 +1558,6 @@ static int dnie_compute_signature(struct sc_card *card,
 {
 	int result = SC_SUCCESS;
 	struct sc_apdu apdu;
-	u8 sbuf[SC_MAX_APDU_BUFFER_SIZE];	/* to compose digest+hash data */
-	size_t sbuflen = 0;
 	u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];	/* to receive sign response */
 
 	/* some preliminar checks */
@@ -1376,7 +1576,7 @@ static int dnie_compute_signature(struct sc_card *card,
 #ifdef ENABLE_DNIE_UI
 	/* (Requested by DGP): on signature operation, ask user consent */
 	if (GET_DNIE_PRIV_DATA(card)->rsa_key_ref == 0x02) {	/* TODO: revise key ID handling */
-		result = sc_ask_user_consent(card,user_consent_title,user_consent_message);
+		result = dnie_ask_user_consent(card,user_consent_title,user_consent_message);
 		LOG_TEST_RET(card->ctx, result, "User consent denied");
 	}
 #endif    
@@ -1391,20 +1591,6 @@ static int dnie_compute_signature(struct sc_card *card,
 	sc_log(card->ctx,
 	       "Compute signature len: '%d' bytes:\n%s\n============================================================",
 	       datalen, sc_dump_hex(data, datalen));
-	if (datalen != 256) {
-		sc_log(card->ctx, "Expected pkcs#1 v1.5 DigestInfo data");
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_WRONG_LENGTH);
-	}
-
-	/* try to strip pkcs1 padding */
-	sbuflen = sizeof(sbuf);
-	memset(sbuf, 0, sbuflen);
-	result = sc_pkcs1_strip_01_padding(card->ctx, data, datalen, sbuf, &sbuflen);
-	if (result != SC_SUCCESS) {
-		sc_log(card->ctx, "Provided data is not pkcs#1 padded");
-		/* TODO: study what to do on plain data */
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_WRONG_PADDING);
-	}
 
 	/*INS: 0x2A  PERFORM SECURITY OPERATION
 	 * P1:  0x9E  Resp: Digital Signature
@@ -1413,9 +1599,9 @@ static int dnie_compute_signature(struct sc_card *card,
 	apdu.resp = rbuf;
 	apdu.resplen = sizeof(rbuf);
 	apdu.le = 256;		/* signature response size */
-	apdu.data = sbuf;
-	apdu.lc = sbuflen;	/* 15 SHA1 DigestInfo + 20 SHA1 computed Hash */
-	apdu.datalen = sizeof(sbuf);
+	apdu.data = data;
+	apdu.lc = datalen;	/*  Caller determines the type of hash and its size */
+	apdu.datalen = datalen;
 	/* tell card to compute signature */
 	result = dnie_transmit_apdu(card, &apdu);
 	LOG_TEST_RET(card->ctx, result, "compute_signature() failed");

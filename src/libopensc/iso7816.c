@@ -31,37 +31,19 @@
 
 
 static void fixup_transceive_length(const struct sc_card *card,
-	   	struct sc_apdu *apdu)
+		struct sc_apdu *apdu)
 {
-	size_t max_send_size;
-	size_t max_recv_size;
-
 	assert(card != NULL && apdu != NULL);
 
-	max_send_size = card->max_send_size;
-	max_recv_size = card->max_recv_size;
-
-	if (card->caps & SC_CARD_CAP_APDU_EXT) {
-		if (!max_send_size)
-			max_send_size = 65535;
-		if (!max_recv_size)
-			max_recv_size = 65536;
-	} else {
-		if (!max_send_size)
-			max_send_size = 255;
-		if (!max_recv_size)
-			max_recv_size = 256;
-	}
-
-	if (apdu->lc > max_send_size) {
+	if (apdu->lc > sc_get_max_send_size(card)) {
 		/* The lower layers will automatically do chaining */
 		apdu->flags |= SC_APDU_FLAGS_CHAINING;
 	}
 
-	if (apdu->le > max_recv_size) {
+	if (apdu->le > sc_get_max_recv_size(card)) {
 		/* The lower layers will automatically do a GET RESPONSE, if possible.
 		 * All other workarounds must be carried out by the upper layers. */
-		apdu->le = max_recv_size;
+		apdu->le = sc_get_max_recv_size(card);
 	}
 }
 
@@ -105,7 +87,7 @@ static const struct sc_card_error iso7816_errors[] = {
 	{ 0x6A87, SC_ERROR_INCORRECT_PARAMETERS,"Lc inconsistent with P1-P2" },
 	{ 0x6A88, SC_ERROR_DATA_OBJECT_NOT_FOUND,"Referenced data not found" },
 	{ 0x6A89, SC_ERROR_FILE_ALREADY_EXISTS,  "File already exists"},
-	{ 0x6A8A, SC_ERROR_FILE_ALREADY_EXISTS,  "DF name already exists"},	
+	{ 0x6A8A, SC_ERROR_FILE_ALREADY_EXISTS,  "DF name already exists"},
 
 	{ 0x6B00, SC_ERROR_INCORRECT_PARAMETERS,"Wrong parameter(s) P1-P2" },
 	{ 0x6D00, SC_ERROR_INS_NOT_SUPPORTED,	"Instruction code not supported or invalid" },
@@ -350,6 +332,7 @@ iso7816_process_fci(struct sc_card *card, struct sc_file *file,
 {
 	struct sc_context *ctx = card->ctx;
 	size_t taglen, len = buflen;
+	int i;
 	const unsigned char *tag = NULL, *p = buf;
 
 	sc_log(ctx, "processing FCI bytes");
@@ -359,17 +342,25 @@ iso7816_process_fci(struct sc_card *card, struct sc_file *file,
 		sc_log(ctx, "  file identifier: 0x%02X%02X", tag[0], tag[1]);
 	}
 
-	tag = sc_asn1_find_tag(ctx, p, len, 0x80, &taglen);
-	if (tag == NULL) {
-		tag = sc_asn1_find_tag(ctx, p, len, 0x81, &taglen);
-	}
-	if (tag != NULL && taglen > 0 && taglen < 3) {
-		file->size = tag[0];
-		if (taglen == 2)
-			file->size = (file->size << 8) + tag[1];
+	/* determine the file size */
+	/* try the tag 0x80 then the tag 0x81 */
+	file->size = 0;
+	for (i = 0x80; i <= 0x81; i++) {
+		int size = 0;
+		len = buflen;
+		tag = sc_asn1_find_tag(ctx, p, len, i, &taglen);
+		if (tag == NULL)
+			continue;
+		if (taglen == 0)
+			continue;
+		if (sc_asn1_decode_integer(tag, taglen, &size) < 0)
+			continue;
+		if (size <0)
+			continue;
+
+		file->size = size;
 		sc_log(ctx, "  bytes in file: %d", file->size);
-	} else {
-		file->size = 0;
+		break;
 	}
 
 	tag = sc_asn1_find_tag(ctx, p, len, 0x82, &taglen);
@@ -532,7 +523,7 @@ iso7816_select_file(struct sc_card *card, const struct sc_path *in_path, struct 
 		apdu.p2 = 0;		/* first record, return FCI */
 		apdu.resp = buf;
 		apdu.resplen = sizeof(buf);
-		apdu.le = card->max_recv_size > 0 && card->max_recv_size < 256 ? card->max_recv_size : 256;
+		apdu.le = sc_get_max_recv_size(card) < 256 ? sc_get_max_recv_size(card) : 256;
 	}
 	else {
 		apdu.p2 = 0x0C;		/* first record, return nothing */
@@ -654,6 +645,7 @@ iso7816_construct_fci(struct sc_card *card, const sc_file_t *file,
 		switch (file->type) {
 		case SC_FILE_TYPE_INTERNAL_EF:
 			buf[0] |= 0x08;
+			/* fall through */
 		case SC_FILE_TYPE_WORKING_EF:
 			buf[0] |= file->ef_structure & 7;
 			break;
@@ -725,8 +717,8 @@ iso7816_get_response(struct sc_card *card, size_t *count, u8 *buf)
 	size_t rlen;
 
 	/* request at most max_recv_size bytes */
-	if (card->max_recv_size > 0 && *count > card->max_recv_size)
-		rlen = card->max_recv_size;
+	if (*count > sc_get_max_recv_size(card))
+		rlen = sc_get_max_recv_size(card);
 	else
 		rlen = *count;
 
@@ -975,6 +967,7 @@ iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
 		struct sc_pin_cmd_data *data, u8 *buf, size_t buf_len)
 {
 	int r, len = 0, pad = 0, use_pin_pad = 0, ins, p1 = 0;
+	int cse = SC_APDU_CASE_3_SHORT;
 
 	switch (data->pin_type) {
 	case SC_AC_CHV:
@@ -999,7 +992,7 @@ iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
 		break;
 	case SC_PIN_CMD_CHANGE:
 		ins = 0x24;
-		if (data->pin1.len != 0 || use_pin_pad) {
+		if (data->pin1.len != 0 || (use_pin_pad && !( data->flags & SC_PIN_CMD_IMPLICIT_CHANGE))) {
 			if ((r = sc_build_pin(buf, buf_len, &data->pin1, pad)) < 0)
 				return r;
 			len += r;
@@ -1023,7 +1016,7 @@ iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
 		break;
 	case SC_PIN_CMD_UNBLOCK:
 		ins = 0x2C;
-		if (data->pin1.len != 0 || use_pin_pad) {
+		if (data->pin1.len != 0 || (use_pin_pad && !( data->flags & SC_PIN_CMD_IMPLICIT_CHANGE))) {
 			if ((r = sc_build_pin(buf, buf_len, &data->pin1, pad)) < 0)
 				return r;
 			len += r;
@@ -1040,11 +1033,16 @@ iso7816_build_pin_apdu(struct sc_card *card, struct sc_apdu *apdu,
 			p1 |= 0x01;
 		}
 		break;
+	case SC_PIN_CMD_GET_INFO:
+		ins = 0x20;
+		/* No data to send or to receive */
+		cse = SC_APDU_CASE_1;
+		break;
 	default:
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 
-	sc_format_apdu(card, apdu, SC_APDU_CASE_3_SHORT, ins, p1, data->pin_reference);
+	sc_format_apdu(card, apdu, cse, ins, p1, data->pin_reference);
 	apdu->lc = len;
 	apdu->datalen = len;
 	apdu->data = buf;
@@ -1064,6 +1062,16 @@ iso7816_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_l
 	if (tries_left)
 		*tries_left = -1;
 
+	/* Many cards do support PIN status queries, but some cards don't and
+	 * mistakenly count the command as a failed PIN attempt, so for now we
+	 * whitelist cards with this flag.  In future this may be reduced to a
+	 * blacklist, subject to testing more cards. */
+	if (data->cmd == SC_PIN_CMD_GET_INFO &&
+	    !(card->caps & SC_CARD_CAP_ISO7816_PIN_INFO)) {
+		sc_log(card->ctx, "Card does not support PIN status queries");
+		return SC_ERROR_NOT_SUPPORTED;
+	}
+
 	/* See if we've been called from another card driver, which is
 	 * passing an APDU to us (this allows to write card drivers
 	 * whose PIN functions behave "mostly like ISO" except in some
@@ -1077,7 +1085,7 @@ iso7816_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_l
 	}
 	apdu = data->apdu;
 
-	if (!(data->flags & SC_PIN_CMD_USE_PINPAD)) {
+	if (!(data->flags & SC_PIN_CMD_USE_PINPAD) || data->cmd == SC_PIN_CMD_GET_INFO) {
 		/* Transmit the APDU to the card */
 		r = sc_transmit_apdu(card, apdu);
 
@@ -1107,13 +1115,56 @@ iso7816_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_l
 		data->apdu = NULL;
 
 	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
-	if (apdu->sw1 == 0x63) {
-		if ((apdu->sw2 & 0xF0) == 0xC0 && tries_left != NULL)
-			*tries_left = apdu->sw2 & 0x0F;
-		return SC_ERROR_PIN_CODE_INCORRECT;
+	r = sc_check_sw(card, apdu->sw1, apdu->sw2);
+
+	if (data->cmd == SC_PIN_CMD_GET_INFO) {
+		if (r == SC_ERROR_PIN_CODE_INCORRECT) {
+			data->pin1.tries_left = apdu->sw2 & 0xF;
+			r = SC_SUCCESS;
+		} else if (r == SC_ERROR_AUTH_METHOD_BLOCKED) {
+			data->pin1.tries_left = 0;
+			r = SC_SUCCESS;
+		}
+
+		if (tries_left != NULL) {
+			*tries_left = data->pin1.tries_left;
+		}
 	}
-	return sc_check_sw(card, apdu->sw1, apdu->sw2);
+
+	return r;
 }
+
+
+static int iso7816_get_data(struct sc_card *card, unsigned int tag,  u8 *buf, size_t len)
+{
+	int                             r, cse;
+	struct sc_apdu                  apdu;
+
+	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (buf && len)
+		cse = SC_APDU_CASE_2;
+	else
+		cse = SC_APDU_CASE_1;
+
+	sc_format_apdu(card, &apdu, cse, 0xCA, (tag >> 8) & 0xff, tag & 0xff);
+	apdu.le = len;
+	apdu.resp = buf;
+	apdu.resplen = len;
+	r = sc_transmit_apdu(card, &apdu);
+	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "GET_DATA returned error");
+
+	if (apdu.resplen > len)
+		r = SC_ERROR_WRONG_LENGTH;
+	else
+		r = apdu.resplen;
+
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+}
+
 
 
 static int
@@ -1163,7 +1214,7 @@ static struct sc_card_operations iso_ops = {
 	iso7816_process_fci,
 	iso7816_construct_fci,
 	iso7816_pin_cmd,
-	NULL,			/* get_data */
+	iso7816_get_data,
 	NULL,			/* put_data */
 	NULL,			/* delete_record */
 	NULL			/* read_public_key */

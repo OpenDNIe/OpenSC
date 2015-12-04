@@ -22,7 +22,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -498,8 +500,8 @@ static int get_se_num_from_keyd(sc_card_t * card, unsigned short fid,
 	char dbgbuf[2048];
 	u8 fidbuf[2];
 
-	fidbuf[0] = fid >> 8;
-	fidbuf[1] = fid;
+	fidbuf[0] = (fid >> 8) & 0xFF;
+	fidbuf[1] = fid & 0xFF;
 
 	dfi = get_df_info(card);
 	if (!dfi || !dfi->keyd_file) {
@@ -808,6 +810,8 @@ do_select(sc_card_t * card, u8 kind,
 	if (p2 == 0x0C) {
 		if (file) {
 			*file = sc_file_new();
+			if (!*file)
+				SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
 			(*file)->type = SC_FILE_TYPE_DF;
 			return SC_SUCCESS;
 		}
@@ -1269,7 +1273,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 
 	if (card->type == SC_CARD_TYPE_MCRD_DTRUST
 	    || card->type == SC_CARD_TYPE_MCRD_GENERIC) {
-		unsigned short fid;
+		unsigned char fid;
 
 		fid = env->key_ref[0];
 		*p = fid;

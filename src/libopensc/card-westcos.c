@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <assert.h>
 #include <string.h>
@@ -533,6 +535,7 @@ static int westcos_create_file(sc_card_t *card, struct sc_file *file)
 		break;
 	case SC_FILE_TYPE_INTERNAL_EF:
 		buf[0] |= 0x80;
+		/* fall through */
 	case SC_FILE_TYPE_WORKING_EF:
 		switch (file->ef_structure) {
 		case SC_FILE_EF_TRANSPARENT:
@@ -1095,12 +1098,12 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 				 size_t outlen)
 {
 	int r;
+	sc_file_t *keyfile = NULL;
+#ifdef ENABLE_OPENSSL
 	int idx = 0;
 	u8 buf[180];
-	sc_file_t *keyfile = sc_file_new();
 	priv_data_t *priv_data = NULL;
 	int pad;
-#ifdef ENABLE_OPENSSL
 	RSA *rsa = NULL;
 	BIO *mem = BIO_new(BIO_s_mem());
 #endif
@@ -1113,7 +1116,7 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 #ifndef ENABLE_OPENSSL
 	r = SC_ERROR_NOT_SUPPORTED;
 #else
-	if (keyfile == NULL || mem == NULL || card->drv_data == NULL) {
+	if (mem == NULL || card->drv_data == NULL) {
 		r = SC_ERROR_OUT_OF_MEMORY;
 		goto out;
 	}
@@ -1154,7 +1157,7 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 		goto out;
 	}
 	r = sc_select_file(card, &(priv_data->env.file_ref), &keyfile);
-	if (r)
+	if (r || !keyfile)
 		goto out;
 
 	do {
@@ -1232,8 +1235,8 @@ out:
 		BIO_free(mem);
 	if (rsa)
 		RSA_free(rsa);
-#endif /* ENABLE_OPENSSL */
 out2:
+#endif /* ENABLE_OPENSSL */
 	if (keyfile)
 		sc_file_free(keyfile);
 	return r;

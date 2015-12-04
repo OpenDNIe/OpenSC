@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -381,7 +383,7 @@ static int miocos_select_file(sc_card_t *card,
 	r = iso_ops->select_file(card, in_path, file);
 	if (r)
 		return r;
-	if (file != NULL) {
+	if (file != NULL && *file != NULL) {
 		parse_sec_attr(*file, (*file)->sec_attr, (*file)->sec_attr_len);
 		miocos_get_acl(card, *file);
 	}

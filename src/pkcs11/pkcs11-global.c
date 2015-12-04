@@ -26,6 +26,14 @@
 #include <sys/time.h>
 #endif
 
+#ifdef PKCS11_THREAD_LOCKING
+#if defined(HAVE_PTHREAD)
+#include <pthread.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
+#endif /* PKCS11_THREAD_LOCKING */
+
 #include "sc-pkcs11.h"
 
 #ifndef MODULE_APP_NAME
@@ -42,11 +50,15 @@ pid_t initialized_pid = (pid_t)-1;
 static int in_finalize = 0;
 extern CK_FUNCTION_LIST pkcs11_function_list;
 
-#if defined(HAVE_PTHREAD) && defined(PKCS11_THREAD_LOCKING)
-#include <pthread.h>
+#ifdef PKCS11_THREAD_LOCKING
+
+#if defined(HAVE_PTHREAD)
+
 CK_RV mutex_create(void **mutex)
 {
-	pthread_mutex_t *m = calloc(1, sizeof(*mutex));
+	pthread_mutex_t *m;
+
+	m = calloc(1, sizeof(*m));
 	if (m == NULL)
 		return CKR_GENERAL_ERROR;;
 	pthread_mutex_init(m, NULL);
@@ -79,7 +91,10 @@ CK_RV mutex_destroy(void *p)
 
 static CK_C_INITIALIZE_ARGS _def_locks = {
 	mutex_create, mutex_destroy, mutex_lock, mutex_unlock, 0, NULL };
-#elif defined(_WIN32) && defined (PKCS11_THREAD_LOCKING)
+#define HAVE_OS_LOCKING
+
+#elif defined(_WIN32)
+
 CK_RV mutex_create(void **mutex)
 {
 	CRITICAL_SECTION *m;
@@ -112,14 +127,18 @@ CK_RV mutex_destroy(void *p)
 	free(p);
 	return CKR_OK;
 }
+
 static CK_C_INITIALIZE_ARGS _def_locks = {
 	mutex_create, mutex_destroy, mutex_lock, mutex_unlock, 0, NULL };
+#define HAVE_OS_LOCKING
+
 #endif
 
+#endif /* PKCS11_THREAD_LOCKING */
+
 static CK_C_INITIALIZE_ARGS_PTR	global_locking;
-static void *			global_lock = NULL;
-#if (defined(HAVE_PTHREAD) || defined(_WIN32)) && defined(PKCS11_THREAD_LOCKING)
-#define HAVE_OS_LOCKING
+static void *global_lock = NULL;
+#ifdef HAVE_OS_LOCKING
 static CK_C_INITIALIZE_ARGS_PTR default_mutex_funcs = &_def_locks;
 #else
 static CK_C_INITIALIZE_ARGS_PTR default_mutex_funcs = NULL;
@@ -202,9 +221,11 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 	unsigned int i;
 	sc_context_param_t ctx_opts;
 
-	/* Handle fork() exception */
 #if !defined(_WIN32)
+	/* Handle fork() exception */
 	if (current_pid != initialized_pid) {
+		if (context)
+			context->flags |= SC_CTX_FLAG_TERMINATE;
 		C_Finalize(NULL_PTR);
 	}
 	initialized_pid = current_pid;
@@ -471,6 +492,7 @@ static sc_timestamp_t get_current_time(void)
 CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
 {
 	struct sc_pkcs11_slot *slot;
+	unsigned int uninit_slotcount;
 	sc_timestamp_t now;
 	CK_RV rv;
 
@@ -482,6 +504,19 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
 		return rv;
 
 	sc_log(context, "C_GetSlotInfo(0x%lx)", slotID);
+
+	if (sc_pkcs11_conf.plug_and_play)
+		uninit_slotcount = 1;
+	else
+		uninit_slotcount = 0;
+	if (sc_pkcs11_conf.init_sloppy && uninit_slotcount <= list_size(&virtual_slots)) {
+		/* Most likely virtual_slots only contains the hotplug slot and has not
+		 * been initialized because the caller has *not* called C_GetSlotList
+		 * before C_GetSlotInfo, as required by PKCS#11.  Initialize
+		 * virtual_slots to make things work and hope the caller knows what
+		 * it's doing... */
+		card_detect_all();
+	}
 
 	rv = slot_get_slot(slotID, &slot);
 	sc_log(context, "C_GetSlotInfo() get slot rv %i", rv);
@@ -533,7 +568,7 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slotID,
 
 	rv = slot_get_token(slotID, &slot);
 	if (rv == CKR_OK)
-		rv = sc_pkcs11_get_mechanism_list(slot->card, pMechanismList, pulCount);
+		rv = sc_pkcs11_get_mechanism_list(slot->p11card, pMechanismList, pulCount);
 
 	sc_pkcs11_unlock();
 	return rv;
@@ -555,7 +590,7 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID,
 
 	rv = slot_get_token(slotID, &slot);
 	if (rv == CKR_OK)
-		rv = sc_pkcs11_get_mechanism_info(slot->card, type, pInfo);
+		rv = sc_pkcs11_get_mechanism_info(slot->p11card, type, pInfo);
 
 	sc_pkcs11_unlock();
 	return rv;
@@ -582,7 +617,8 @@ CK_RV C_InitToken(CK_SLOT_ID slotID,
 		goto out;
 	}
 
-	if (slot->card->framework->init_token == NULL) {
+	if (!slot->p11card || !slot->p11card->framework
+		   || !slot->p11card->framework->init_token) {
 		sc_log(context, "C_InitToken() not supported by framework");
 		rv = CKR_FUNCTION_NOT_SUPPORTED;
 		goto out;
@@ -597,7 +633,7 @@ CK_RV C_InitToken(CK_SLOT_ID slotID,
 		}
 	}
 
-	rv = slot->card->framework->init_token(slot,slot->fw_data, pPin, ulPinLen, pLabel);
+	rv = slot->p11card->framework->init_token(slot,slot->fw_data, pPin, ulPinLen, pLabel);
 	if (rv == CKR_OK) {
 		/* Now we should re-bind all tokens so they get the
 		 * corresponding function vector and flags */

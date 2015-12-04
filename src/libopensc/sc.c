@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <ctype.h>
@@ -798,13 +800,18 @@ void *sc_mem_alloc_secure(sc_context_t *ctx, size_t len)
     if (!pointer)
         return NULL;
 #ifdef HAVE_SYS_MMAN_H
-    /* TODO Windows support and mprotect too */
+    /* TODO mprotect */
     /* Do not swap the memory */
     if (mlock(pointer, len) >= 0)
         locked = 1;
 #endif
+#ifdef _WIN32
+	/* Do not swap the memory */
+	if (VirtualLock(pointer, len) != 0)
+		locked = 1;
+#endif
     if (!locked) {
-        if (ctx->paranoid_memory) {
+        if (ctx->flags & SC_CTX_FLAG_PARANOID_MEMORY) {
             sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, failing allocation because paranoid set");
             free (pointer);
             pointer = NULL;

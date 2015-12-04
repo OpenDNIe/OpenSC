@@ -11,7 +11,7 @@ noinst_HEADERS = cards.h ctbcs.h internal.h esteid.h muscle.h muscle-filesystem.
 	cardctl.h asn1.h log.h \
 	errors.h types.h compression.h itacns.h iso7816.h \
 	authentic.h iasecc.h iasecc-sdo.h sm.h card-sc-hsm.h \
-	pace.h cwa14890.h user-interface.h cwa-dnie.h
+	pace.h cwa14890.h cwa-dnie.h
 
 AM_CPPFLAGS = -DOPENSC_CONF_PATH=\"$(sysconfdir)/opensc.conf\" \
 	-I$(top_srcdir)/src
@@ -40,8 +40,8 @@ libopensc_la_SOURCES = \
 	card-rtecp.c card-westcos.c card-myeid.c card-ias.c \
 	card-itacns.c card-authentic.c \
 	card-iasecc.c iasecc-sdo.c iasecc-sm.c card-sc-hsm.c \
-	card-dnie.c cwa14890.c cwa-dnie.c user-interface.c \
-	card-isoApplet.c \
+	card-dnie.c cwa14890.c cwa-dnie.c \
+	card-isoApplet.c card-masktech.c \
 	\
 	pkcs15-openpgp.c pkcs15-infocamere.c pkcs15-starcert.c \
 	pkcs15-tcos.c pkcs15-esteid.c pkcs15-postecert.c pkcs15-gemsafeGPK.c \

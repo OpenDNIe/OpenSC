@@ -523,9 +523,9 @@ typedef struct sc_cardctl_muscle_key_info {
 	int 	keyType;
 	int 	keyLocation;
 	int 	keySize;
-	int 	modLength;
+	size_t 	modLength;
 	u8* 	modValue;
-	int 	expLength;
+	size_t 	expLength;
 	u8* 	expValue;
 	int 	pLength;
 	u8* 	pValue;
@@ -943,7 +943,7 @@ typedef struct sc_cardctl_sc_hsm_init_param {
 	size_t user_pin_len;		/* Length of user PIN */
 	u8 user_pin_retry_counter;	/* Retry counter default value */
 	u8 options[2];				/* Initialization options */
-	char dkek_shares;			/* Number of DKEK shares, 0 for card generated, -1 for none */
+	signed char dkek_shares;	/* Number of DKEK shares, 0 for card generated, -1 for none */
 	char *label;				/* Token label to be set in EF.TokenInfo (2F03) */
 } sc_cardctl_sc_hsm_init_param_t;
 

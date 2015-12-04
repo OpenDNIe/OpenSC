@@ -252,6 +252,8 @@ static int cwa_compose_tlv(sc_card_t * card,
  * NOTICE that iso7816 sect 5.2.2 states that Tag length may be 1 to n bytes
  * length. In this code we'll assume allways tag lenght = 1 byte
  *
+ * FIXME use `sc_asn1_read_tag` or similar instead
+ *
  * @param card card info structure
  * @param data Buffer to look for tlv into
  * @param datalen Buffer len
@@ -305,12 +307,15 @@ static int cwa_parse_tlv(sc_card_t * card,
 		switch (0xff & *(buffer + n + 1)) {
 		case 0x84:
 			tlv->len = (0xff & *(buffer + n + j++));
+			/* fall through */
 		case 0x83:
 			tlv->len =
 			    (tlv->len << 8) + (0xff & *(buffer + n + j++));
+			/* fall through */
 		case 0x82:
 			tlv->len =
 			    (tlv->len << 8) + (0xff & *(buffer + n + j++));
+			/* fall through */
 		case 0x81:
 			tlv->len =
 			    (tlv->len << 8) + (0xff & *(buffer + n + j++));
@@ -1397,6 +1402,11 @@ int cwa_create_secure_channel(sc_card_t * card,
 	/* arriving here means ok: cleanup */
 	res = SC_SUCCESS;
  csc_end:
+	free(tlv);
+	if (icc_cert)
+		X509_free(icc_cert);
+	if (ca_cert)
+		X509_free(ca_cert);
 	if (icc_pubkey)
 		EVP_PKEY_free(icc_pubkey);
 	if (ifd_privkey)
@@ -1462,17 +1472,21 @@ int cwa_encode_apdu(sc_card_t * card,
 	/* reserve extra bytes for padding and tlv header */
 	msgbuf = calloc(12 + from->lc, sizeof(u8));	/* to encrypt apdu data */
 	cryptbuf = calloc(12 + from->lc, sizeof(u8));
-	if (!msgbuf || !cryptbuf)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if (!msgbuf || !cryptbuf) {
+		res = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
 
 	/* check if APDU is already encoded */
 	if ((from->cla & 0x0C) != 0) {
 		memcpy(to, from, sizeof(sc_apdu_t));
-		return SC_SUCCESS;	/* already encoded */
+		res = SC_SUCCESS;	/* already encoded */
+		goto encode_end;
 	}
 	if (from->ins == 0xC0) {
 		memcpy(to, from, sizeof(sc_apdu_t));
-		return SC_SUCCESS;	/* dont encode GET Response cmd */
+		res = SC_SUCCESS;	/* dont encode GET Response cmd */
+		goto encode_end;
 	}
 
 	/* call provider pre-operation method */
@@ -1489,14 +1503,17 @@ int cwa_encode_apdu(sc_card_t * card,
 
 	/* reserve enougth space for apdulen+tlv bytes 
 	 * to-be-crypted buffer and result apdu buffer */
+	 /* TODO DEE add 4 more bytes for testing.... */
 	apdubuf =
 	    calloc(MAX(SC_MAX_APDU_BUFFER_SIZE, 20 + from->datalen),
 		   sizeof(u8));
 	ccbuf =
 	    calloc(MAX(SC_MAX_APDU_BUFFER_SIZE, 20 + from->datalen),
 		   sizeof(u8));
-	if (!apdubuf || !ccbuf)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
+	if (!apdubuf || !ccbuf) {
+		res = SC_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
 
 	/* set up data on destination apdu */
 	to->cse = SC_APDU_CASE_3_SHORT;
@@ -1544,14 +1561,16 @@ int cwa_encode_apdu(sc_card_t * card,
 	}
 
 	/* if le byte is declared, compose and add Le TLV */
-	/* TODO: study why original driver checks for le>=256? */
-	if (from->le > 0) {
-		u8 le = 0xff & from->le;
-		res = cwa_compose_tlv(card, 0x97, 1, &le, &ccbuf, &cclen);
-		if (res != SC_SUCCESS) {
-			msg = "Encode APDU compose_tlv(0x97) failed";
-			goto encode_end;
-		}
+	/* FIXME: For DNIe we must not send the le bytes
+	  when le == 256 but this goes against the standard
+	  and might break other cards reusing this code */
+	if ((0xff & from->le) > 0) {
+	    u8 le = 0xff & from->le;
+	    res = cwa_compose_tlv(card, 0x97, 1, &le, &ccbuf, &cclen);
+	    if (res != SC_SUCCESS) {
+		msg = "Encode APDU compose_tlv(0x97) failed";
+		goto encode_end;
+	    }
 	}
 	/* copy current data to apdu buffer (skip header and header padding) */
 	memcpy(apdubuf, ccbuf + 8, cclen - 8);
@@ -1608,6 +1627,7 @@ int cwa_encode_apdu(sc_card_t * card,
 	res = SC_SUCCESS;
 	goto encode_end_apdu_valid;
 
+err:
 encode_end:
 	if (apdubuf)
 		free(apdubuf);
